@@ -899,6 +899,10 @@ impl Display for Module {
                         "slot {}: ANLEG IR module version {} sw: {}.{}.{}",
                         self.slot, hardware[3], software[0], software[1], software[2]
                     ),
+                    4 => format!(
+                        "slot {}: Multibus module version {} sw: {}.{}.{}",
+                        self.slot, hardware[3], software[0], software[1], software[2]
+                    ),
                     _ => format!("slot {}: unknown: {}", self.slot, self.firmware.as_string()),
                 },
                 40 => match hardware[2] {

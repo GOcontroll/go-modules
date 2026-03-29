@@ -1,0 +1,91 @@
+name: Build and publish go-modules package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y dpkg-dev gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Configure cargo for cross-compilation
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: Build .deb
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          PACKAGE=go-modules
+          ARCH=arm64
+          BUILD="${RUNNER_TEMP}/${PACKAGE}_${VERSION}_${ARCH}"
+          DIST="${RUNNER_TEMP}/dist"
+
+          mkdir -p "${BUILD}/DEBIAN" "${BUILD}/usr/bin" "${DIST}"
+
+          # --- Binary -------------------------------------------------------------
+          install -Dm755 "target/aarch64-unknown-linux-gnu/release/go-modules" \
+            "${BUILD}/usr/bin/go-modules"
+
+          # --- DEBIAN/control -----------------------------------------------------
+          cat > "${BUILD}/DEBIAN/control" << EOF
+          Package: ${PACKAGE}
+          Version: ${VERSION}
+          Architecture: ${ARCH}
+          Maintainer: GOcontroll B.V. <info@gocontroll.com>
+          Depends: libc6
+          Section: utils
+          Priority: optional
+          Homepage: https://gocontroll.com
+          Description: GOcontroll module firmware tool
+           CLI tool to scan, update and overwrite firmware on GOcontroll
+           Moduline I/O modules via SPI.
+          EOF
+
+          # --- Build --------------------------------------------------------------
+          dpkg-deb --build --root-owner-group "${BUILD}" \
+            "${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"
+
+          echo "Built: ${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/dist/go-modules_${{ steps.version.outputs.version }}_arm64.deb
+          generate_release_notes: true
+
+      - name: Trigger go-apt index rebuild
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: GOcontroll/go-apt
+          event-type: rebuild-index
+          client-payload: |
+            {
+              "package": "go-modules",
+              "version": "${{ steps.version.outputs.version }}",
+              "arch": "arm64",
+              "codename": "trixie",
+              "deb_url": "https://github.com/GOcontroll/go-modules/releases/download/${{ github.ref_name }}/go-modules_${{ steps.version.outputs.version }}_arm64.deb"
+            }

@@ -59,7 +59,7 @@ jobs:
           EOF
 
           # --- Build --------------------------------------------------------------
-          dpkg-deb --build --root-owner-group "${BUILD}" \
+          dpkg-deb -Zxz --build --root-owner-group "${BUILD}" \
             "${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"
 
           echo "Built: ${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"

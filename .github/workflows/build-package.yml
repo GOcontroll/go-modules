@@ -81,6 +81,5 @@ jobs:
               "package": "go-modules",
               "version": "${{ steps.version.outputs.version }}",
               "arch": "arm64",
-              "codename": "trixie",
               "deb_url": "https://github.com/GOcontroll/go-modules/releases/download/${{ github.ref_name }}/go-modules_${{ steps.version.outputs.version }}_arm64.deb"
             }

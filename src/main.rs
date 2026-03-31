@@ -1029,22 +1029,22 @@ async fn get_modules_and_save(controller: ControllerTypes) -> Vec<Module> {
     save_modules(modules_out, &controller)
 }
 
-/// save all the modules to modules to /usr/lib/gocontroll/modules, None elements will be removed from the file
+/// save all the modules to modules to /lib/firmware/gocontroll/modules, None elements will be removed from the file
 fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> Vec<Module> {
     let modules_string =
-        if let Ok(contents) = std::fs::read_to_string("/usr/lib/gocontroll/modules") {
+        if let Ok(contents) = std::fs::read_to_string("/lib/firmware/gocontroll/modules") {
             if contents.split('\n').count() == 4 {
                 // for some reason the file from older systems is messed up sometimes
                 contents
             } else {
-                if std::fs::create_dir_all("/usr/lib/gocontroll/").is_err() {
-                    eprintln!("Could not create /usr/lib/gocontroll/");
+                if std::fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
+                    eprintln!("Could not create /lib/firmware/gocontroll/");
                 }
                 controller.get_empty_modules_file()
             }
         } else {
-            if std::fs::create_dir_all("/usr/lib/gocontroll/").is_err() {
-                eprintln!("Could not create /usr/lib/gocontroll/");
+            if std::fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
+                eprintln!("Could not create /lib/firmware/gocontroll/");
             }
             //if the file doesn't exist, generate a new template
             controller.get_empty_modules_file()
@@ -1098,8 +1098,8 @@ fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> V
     lines[2] = front_qrs.join(":");
     lines[3] = rear_qrs.join(":");
 
-    if std::fs::write("/usr/lib/gocontroll/modules", lines.join("\n")).is_err() {
-        eprintln!("Could not save new layout to /usr/lib/gocontroll/modules")
+    if std::fs::write("/lib/firmware/gocontroll/modules", lines.join("\n")).is_err() {
+        eprintln!("Could not save new layout to /lib/firmware/gocontroll/modules")
     }
     modules.into_iter().flatten().collect()
 }

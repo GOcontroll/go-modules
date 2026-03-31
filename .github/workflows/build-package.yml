@@ -39,30 +39,25 @@ jobs:
 
           mkdir -p "${BUILD}/DEBIAN" "${BUILD}/usr/bin" "${DIST}"
 
-          # --- Binary -------------------------------------------------------------
           install -Dm755 "target/aarch64-unknown-linux-gnu/release/go-modules" \
             "${BUILD}/usr/bin/go-modules"
 
-          # --- DEBIAN/control -----------------------------------------------------
-          cat > "${BUILD}/DEBIAN/control" << EOF
+          cat > "${BUILD}/DEBIAN/control" << CONTROL
           Package: ${PACKAGE}
           Version: ${VERSION}
           Architecture: ${ARCH}
           Maintainer: GOcontroll B.V. <info@gocontroll.com>
-          Depends: libc6
+          Depends: libc-bin
           Section: utils
           Priority: optional
           Homepage: https://gocontroll.com
-          Description: GOcontroll module firmware tool
-           CLI tool to scan, update and overwrite firmware on GOcontroll
-           Moduline I/O modules via SPI.
-          EOF
+          Description: Module firmware management for GOcontroll Moduline controllers
+           Scans, updates and overwrites firmware on GOcontroll Moduline controller
+           modules via SPI.
+          CONTROL
 
-          # --- Build --------------------------------------------------------------
           dpkg-deb -Zxz --build --root-owner-group "${BUILD}" \
             "${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"
-
-          echo "Built: ${DIST}/${PACKAGE}_${VERSION}_${ARCH}.deb"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

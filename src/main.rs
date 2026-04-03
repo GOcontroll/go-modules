@@ -19,6 +19,10 @@ use tokio::{task, task::JoinSet, time, time::timeout};
 
 use gpio_cdev::{AsyncLineEventHandle, Chip, EventRequestFlags, LineRequestFlags};
 
+use serde::Deserialize;
+
+use sha2::{Digest, Sha256};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const DUMMY_MESSAGE: [u8; 5] = [0; 5];
@@ -27,6 +31,9 @@ const BOOTMESSAGE_LENGTH: usize = 46;
 const BOOTMESSAGE_LENGTH_CHECK: usize = 61;
 
 const SLOT_PROMPT: &str = "Which slot to overwrite?";
+
+const FIRMWARE_DIR: &str = "/lib/firmware/gocontroll/";
+const CLOUD_BASE_URL: &str = "https://firmware.gocontroll.com";
 
 const USAGE: &str = "Usage:
 go-modules <command> [subcommands]
@@ -37,13 +44,18 @@ commands:
 scan							Scan the modules in the controller
 update <all/slot#>				In case of all, try to update all modules, in case of a slot number, try to update that slot specifically
 overwrite <slot> <firmware>		Overwrite the firmware in <slot> with <firmware>
+check [--verbose/-v]			Fetch latest firmware for all modules from the GOcontroll cloud.
+								Downloads to /lib/firmware/gocontroll/ and validates checksums.
+								Use --verbose or -v to show release dates and changelogs.
 
 examples:
 go-modules										Use with the tui (recommended)
 go-modules scan									Scan all modules in the controller
 go-modules update all							Try to update all modules in the controller
 go-modules update 1								Try to update the module in slot 1
-go-modules overwrite 1 20-10-1-5-0-0-9.srec		Forcefully overwrite the module in slot 1 with 20-10-1-5-0-0-9.srec (can be used to downgrade modules)";
+go-modules overwrite 1 20-10-1-5-0-0-9.srec		Forcefully overwrite the module in slot 1 with 20-10-1-5-0-0-9.srec (can be used to downgrade modules)
+go-modules check								Fetch latest firmware files from the GOcontroll cloud
+go-modules check --verbose						Fetch latest firmware files and show release dates and changelogs";
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct FirmwareVersion {
@@ -109,6 +121,7 @@ enum CommandArg {
     Scan,
     Update,
     Overwrite,
+    Check,
 }
 
 //impl display to make sure we don't have capital letters, as the don't match the commands
@@ -121,6 +134,7 @@ impl Display for CommandArg {
                 Self::Scan => "scan",
                 Self::Update => "update",
                 Self::Overwrite => "overwrite",
+                Self::Check => "check",
             }
         )
     }
@@ -172,6 +186,34 @@ struct Module {
     manufacturer: u32,
     qr_front: u32,
     qr_back: u32,
+}
+
+/// Cloud manifest structs for firmware.gocontroll.com
+#[derive(Deserialize)]
+struct CloudMainManifest {
+    updated: String,
+    modules: Vec<CloudModuleEntry>,
+}
+
+#[derive(Deserialize)]
+struct CloudModuleEntry {
+    manifest: String,
+}
+
+#[derive(Deserialize)]
+struct CloudModuleManifest {
+    name: String,
+    hardware_version: String,
+    releases: Vec<CloudRelease>,
+}
+
+#[derive(Deserialize)]
+struct CloudRelease {
+    sw_version: String,
+    file: String,
+    date: String,
+    sha256: String,
+    changelog: String,
 }
 
 impl Module {
@@ -518,7 +560,8 @@ impl Module {
 
         //open and read the firmware file
         let firmware_content_string = match fs::read_to_string(format!(
-            "/lib/firmware/gocontroll/{}",
+            "{}{}",
+            FIRMWARE_DIR,
             new_firmware.as_filename()
         )) {
             Ok(file) => file,
@@ -719,7 +762,7 @@ impl Module {
                                 message_type = 0;
                             }
                         } else {
-                            // normal firmware message succes
+                            // normal firmware message success
                             line_number += 1;
                             firmware_error_counter = 0;
                             progress.inc(1);
@@ -788,7 +831,7 @@ impl Module {
               //wait for interrupt to happen (or 1 millisecond to pass), then continue with the next line
             _ = timeout(Duration::from_micros(1000), interrupt).await;
         } //exit while
-        progress.finish_with_message("Upload successfull!");
+        progress.finish_with_message("Upload successful!");
         self.cancel_firmware_upload(&mut tx_buf);
         Ok(())
     }
@@ -980,6 +1023,13 @@ where
     a
 }
 
+/// verify the SHA256 checksum of a byte slice against an expected hex string
+fn verify_sha256(data: &[u8], expected_hex: &str) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize()) == expected_hex
+}
+
 /// get module interrupt pin
 fn get_interrupt(chip: &str, line: u32, slot: u8) -> Option<AsyncLineEventHandle> {
     let mut chip = Chip::new(chip)
@@ -996,6 +1046,149 @@ fn get_interrupt(chip: &str, line: u32, slot: u8) -> Option<AsyncLineEventHandle
     )
     .map_err(|err| eprintln!("Could not get slot {slot} interrupt line handle: {err}"))
     .ok()
+}
+
+/// Fetch the latest firmware files from the GOcontroll cloud and save them locally.
+/// Validates SHA256 checksums. Prints status for each module.
+/// With verbose=true, also prints release dates and changelogs.
+async fn check_firmware(verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Checking for firmware updates...");
+
+    let client = reqwest::Client::new();
+
+    // Fetch main manifest
+    let main_manifest: CloudMainManifest = client
+        .get(format!("{}/modules/manifest.json", CLOUD_BASE_URL))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    println!("Cloud manifest last updated: {}\n", main_manifest.updated);
+
+    // Ensure firmware directory exists
+    fs::create_dir_all(FIRMWARE_DIR)
+        .map_err(|e| format!("Could not create firmware directory {FIRMWARE_DIR}: {e}"))?;
+
+    for entry in &main_manifest.modules {
+        // Fetch per-module sub-manifest
+        let sub_manifest: CloudModuleManifest = match client
+            .get(format!("{}/{}", CLOUD_BASE_URL, entry.manifest))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json().await {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Could not parse manifest {}: {e}", entry.manifest);
+                    continue;
+                }
+            },
+            Err(e) => {
+                eprintln!("Could not fetch manifest {}: {e}", entry.manifest);
+                continue;
+            }
+        };
+
+        // The first entry in releases is the latest version
+        let latest = match sub_manifest.releases.first() {
+            Some(r) => r,
+            None => {
+                eprintln!(
+                    "{} (HW {}): no releases found",
+                    sub_manifest.name, sub_manifest.hardware_version
+                );
+                continue;
+            }
+        };
+
+        // Extract filename from the cloud file path (e.g. "modules/20100103/20-10-1-3-2-0-3.srec")
+        let filename = match latest.file.split('/').last() {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                eprintln!("Invalid file path in manifest: {}", latest.file);
+                continue;
+            }
+        };
+
+        let local_path = format!("{}{}", FIRMWARE_DIR, filename);
+
+        // Check if the file already exists and has a valid checksum
+        if let Ok(existing_data) = fs::read(&local_path) {
+            if verify_sha256(&existing_data, &latest.sha256) {
+                println!(
+                    "{} (HW {}): v{} - already up to date",
+                    sub_manifest.name, sub_manifest.hardware_version, latest.sw_version
+                );
+                if verbose {
+                    println!("  Released: {}", latest.date);
+                    println!("  Changes:  {}", latest.changelog);
+                    println!();
+                }
+                continue;
+            }
+            // File exists but checksum is wrong — re-download
+            println!(
+                "{} (HW {}): v{} - local file corrupted, re-downloading...",
+                sub_manifest.name, sub_manifest.hardware_version, latest.sw_version
+            );
+        }
+
+        // Download the firmware file
+        let data = match client
+            .get(format!("{}/{}", CLOUD_BASE_URL, latest.file))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!(
+                        "{} (HW {}): download failed: {e}",
+                        sub_manifest.name, sub_manifest.hardware_version
+                    );
+                    continue;
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "{} (HW {}): download failed: {e}",
+                    sub_manifest.name, sub_manifest.hardware_version
+                );
+                continue;
+            }
+        };
+
+        // Verify SHA256 checksum of downloaded data
+        if !verify_sha256(&data, &latest.sha256) {
+            eprintln!(
+                "{} (HW {}): v{} - checksum verification failed! File not saved.",
+                sub_manifest.name, sub_manifest.hardware_version, latest.sw_version
+            );
+            continue;
+        }
+
+        // Save to local firmware directory
+        if let Err(e) = fs::write(&local_path, &data) {
+            eprintln!(
+                "{} (HW {}): could not save {}: {e}",
+                sub_manifest.name, sub_manifest.hardware_version, filename
+            );
+            continue;
+        }
+
+        println!(
+            "{} (HW {}): v{} - downloaded",
+            sub_manifest.name, sub_manifest.hardware_version, latest.sw_version
+        );
+        if verbose {
+            println!("  Released: {}", latest.date);
+            println!("  Changes:  {}", latest.changelog);
+            println!();
+        }
+    }
+
+    Ok(())
 }
 
 /// get the current modules in the controller
@@ -1119,7 +1312,7 @@ async fn update_one_module(
     {
         Ok(Ok(module)) => {
             println!(
-                "Succesfully updated slot {} to {}",
+                "Successfully updated slot {} to {}",
                 module.slot,
                 module.firmware.as_string()
             );
@@ -1193,7 +1386,7 @@ async fn update_all_modules(
         }
     }
     if !new_modules.is_empty() {
-        println!("Succesfully updated:");
+        println!("Successfully updated:");
         for module in &new_modules {
             println!(
                 "slot {} to {}",
@@ -1217,6 +1410,18 @@ async fn main() {
     println!("GOcontroll module management utility V{}", VERSION);
     #[cfg(debug_assertions)]
     println!("Debug version");
+
+    // Handle the check command early — before hardware detection, service management, and module scanning.
+    // This allows `check` to run on any system with network access, without requiring SPI hardware.
+    if env::args().nth(1).as_deref() == Some("check") {
+        let verbose = env::args().any(|a| a == "--verbose" || a == "-v");
+        if let Err(e) = check_firmware(verbose).await {
+            eprintln!("Error checking for firmware updates: {e}");
+            exit(1);
+        }
+        exit(0);
+    }
+
     //get the controller hardware
     let hardware_string= fs::read_to_string("/sys/firmware/devicetree/base/hardware").unwrap_or_else(|_|{
 		err_n_die("Could not find a hardware description file, this feature is not supported by your hardware.");
@@ -1283,7 +1488,7 @@ async fn main() {
     let modules_fut = task::spawn(get_modules_and_save(controller));
 
     //get all the firmwares
-    let available_firmwares: Vec<FirmwareVersion> = fs::read_dir("/lib/firmware/gocontroll/")
+    let available_firmwares: Vec<FirmwareVersion> = fs::read_dir(FIRMWARE_DIR)
         .unwrap_or_else(|_| {
             eprintln!("Could not find the firmware folder");
             err_n_restart_services(nodered, simulink);
@@ -1316,11 +1521,38 @@ async fn main() {
     } else {
         Select::new(
             "What do you want to do?",
-            vec![CommandArg::Scan, CommandArg::Update, CommandArg::Overwrite],
+            vec![
+                CommandArg::Scan,
+                CommandArg::Update,
+                CommandArg::Overwrite,
+                CommandArg::Check,
+            ],
         )
         .prompt()
         .unwrap_or_else(|_| err_n_restart_services(nodered, simulink))
     };
+
+    // If the user selected Check from the TUI, run it and exit cleanly
+    if let CommandArg::Check = command {
+        // Services were stopped — restart them before running check (check doesn't need them stopped)
+        if nodered {
+            _ = Command::new("systemctl")
+                .arg("start")
+                .arg("nodered")
+                .status();
+        }
+        if simulink {
+            _ = Command::new("systemctl")
+                .arg("start")
+                .arg("go-simulink")
+                .status();
+        }
+        if let Err(e) = check_firmware(false).await {
+            eprintln!("Error checking for firmware updates: {e}");
+            exit(1);
+        }
+        exit(0);
+    }
 
     //get the modules from the previously started task
     let modules = modules_fut.await.unwrap_or_else(|_| {
@@ -1466,7 +1698,7 @@ async fn main() {
                     if available_firmwares.contains(&firmware) {
                         firmware
                     } else {
-                        eprintln!("/lib/firmware/gocontroll/{} does not exist", arg);
+                        eprintln!("{}{} does not exist", FIRMWARE_DIR, arg);
                         err_n_restart_services(nodered, simulink);
                     }
                 } else {
@@ -1493,7 +1725,7 @@ async fn main() {
             {
                 Ok(()) => {
                     println!(
-                        "succesfully updated slot {} from {} to {}",
+                        "Successfully updated slot {} from {} to {}",
                         module.slot,
                         module.firmware.as_string(),
                         new_firmware.as_string()
@@ -1521,5 +1753,8 @@ async fn main() {
                 },
             }
         }
+
+        // Check is handled earlier in main before this match, this arm is unreachable
+        CommandArg::Check => unreachable!(),
     }
 }

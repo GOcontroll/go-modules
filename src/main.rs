@@ -25,6 +25,15 @@ use sha2::{Digest, Sha256};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn print_banner() {
+    let text = format!("  GOcontroll Module Manager  V{}  ", VERSION);
+    let w = text.len().max(60);
+    println!("╔{}╗", "═".repeat(w));
+    println!("║{:<width$}║", text, width = w);
+    println!("╚{}╝", "═".repeat(w));
+    println!();
+}
+
 const DUMMY_MESSAGE: [u8; 5] = [0; 5];
 
 const BOOTMESSAGE_LENGTH: usize = 46;
@@ -1407,7 +1416,7 @@ async fn update_all_modules(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
 async fn main() {
-    println!("GOcontroll module management utility V{}", VERSION);
+    print_banner();
     #[cfg(debug_assertions)]
     println!("Debug version");
 

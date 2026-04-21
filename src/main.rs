@@ -970,6 +970,95 @@ impl Display for Module {
     }
 }
 
+impl Module {
+    fn type_name(&self) -> &'static str {
+        let hw = self.firmware.get_hardware();
+        match hw[1] {
+            10 => match hw[2] {
+                1 => "6 Channel Input",
+                2 => "10 Channel Input",
+                3 => "4-20mA Input",
+                _ => "Unknown",
+            },
+            20 => match hw[2] {
+                1 => "2 Channel Output",
+                2 => "6 Channel Output",
+                3 => "10 Channel Output",
+                _ => "Unknown",
+            },
+            30 => match hw[2] {
+                3 => "ANLEG IR",
+                4 => "Multibus",
+                _ => "Unknown",
+            },
+            40 => match hw[2] {
+                1 => "ANLEG RTC Control",
+                _ => "Unknown",
+            },
+            _ => "Unknown",
+        }
+    }
+}
+
+fn print_hline(widths: &[usize], l: &str, m: &str, r: &str) {
+    let mut s = l.to_string();
+    for (i, &w) in widths.iter().enumerate() {
+        s.push_str(&"═".repeat(w + 2));
+        if i + 1 < widths.len() {
+            s.push_str(m);
+        }
+    }
+    s.push_str(r);
+    println!("{s}");
+}
+
+fn print_data_row(widths: &[usize], cells: &[String]) {
+    let mut s = String::from("║");
+    for (i, &w) in widths.iter().enumerate() {
+        let cell = cells.get(i).map(String::as_str).unwrap_or("");
+        let _ = write!(s, " {:<width$} ║", cell, width = w);
+    }
+    println!("{s}");
+}
+
+fn print_module_table(modules: &[Module]) {
+    let headers = [
+        "Slot", "Type", "HW", "SW Version", "Manufacturer", "QR Front", "QR Back",
+    ];
+
+    let rows: Vec<[String; 7]> = modules
+        .iter()
+        .map(|m| {
+            let hw = m.firmware.get_hardware();
+            let sw = m.firmware.get_software();
+            [
+                m.slot.to_string(),
+                m.type_name().to_string(),
+                hw[3].to_string(),
+                format!("{}.{}.{}", sw[0], sw[1], sw[2]),
+                m.manufacturer.to_string(),
+                m.qr_front.to_string(),
+                m.qr_back.to_string(),
+            ]
+        })
+        .collect();
+
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+
+    print_hline(&widths, "╔", "╦", "╗");
+    print_data_row(&widths, &headers.map(str::to_string));
+    print_hline(&widths, "╠", "╬", "╣");
+    for row in &rows {
+        print_data_row(&widths, row);
+    }
+    print_hline(&widths, "╚", "╩", "╝");
+}
+
 /// error out and restart nodered and go-simulink if required
 fn err_n_restart_services(nodered: bool, simulink: bool) -> ! {
     if nodered {
@@ -1571,12 +1660,8 @@ async fn main() {
 
     match command {
         CommandArg::Scan => {
-            //scan and save has already been done before this option was even selected, print out the values and exit
             if !modules.is_empty() {
-                println!("Found modules:");
-                for module in &modules {
-                    println!("{}", module);
-                }
+                print_module_table(&modules);
             } else {
                 println!("No modules found")
             }

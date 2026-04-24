@@ -11,7 +11,7 @@ use futures::StreamExt;
 
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
 
-use inquire::Select;
+use inquire::{Confirm, Select};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
@@ -1586,16 +1586,37 @@ async fn main() {
     let modules_fut = task::spawn(get_modules_and_save(controller));
 
     //get all the firmwares
-    let available_firmwares: Vec<FirmwareVersion> = fs::read_dir(FIRMWARE_DIR)
-        .unwrap_or_else(|_| {
-            eprintln!("Could not find the firmware folder");
-            err_n_restart_services(nodered, simulink);
-        }) // get the gocontroll firmware files
-        .map(|file| file.unwrap().file_name().to_str().unwrap().to_string()) //turn them into strings
-        .filter(|file_name| file_name.ends_with(".srec")) //keep only the srec files
-        .map(|firmware| FirmwareVersion::from_filename(firmware)) //turn them into FirmwareVersion Structs
-        .flatten()
-        .collect(); //collect them into a vector
+    let read_firmware_dir = || -> Vec<FirmwareVersion> {
+        fs::read_dir(FIRMWARE_DIR)
+            .unwrap_or_else(|_| {
+                eprintln!("Could not find the firmware folder");
+                err_n_restart_services(nodered, simulink);
+            })
+            .map(|file| file.unwrap().file_name().to_str().unwrap().to_string())
+            .filter(|file_name| file_name.ends_with(".srec"))
+            .map(|firmware| FirmwareVersion::from_filename(firmware))
+            .flatten()
+            .collect()
+    };
+
+    let available_firmwares: Vec<FirmwareVersion> = if fs::metadata(FIRMWARE_DIR).is_err() {
+        println!("No firmware found on this controller.");
+        let download = Confirm::new("Do you want to download the latest firmware?")
+            .with_default(true)
+            .prompt()
+            .unwrap_or(false);
+        if download {
+            if let Err(e) = check_firmware(false).await {
+                eprintln!("Error downloading firmware: {e}");
+                err_n_restart_services(nodered, simulink);
+            }
+            read_firmware_dir()
+        } else {
+            vec![]
+        }
+    } else {
+        read_firmware_dir()
+    };
 
     //create the base for the progress bar(s)
     let multi_progress = MultiProgress::new();

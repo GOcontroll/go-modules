@@ -1,6 +1,6 @@
 [package]
 name = "go-modules"
-version = "3.0.2"
+version = "3.0.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/GOcontroll/go-modules"

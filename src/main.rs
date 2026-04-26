@@ -298,7 +298,7 @@ impl Module {
                 ),
                 _ => {
                     eprintln!(
-                        "For the Moduline IV, slot should be a value from 1-8 but it was {}",
+                        "For the Moduline L4, slot should be a value from 1-8 but it was {}",
                         slot
                     );
                     return None;
@@ -339,7 +339,7 @@ impl Module {
                 ),
                 _ => {
                     eprintln!(
-                        "For the Moduline Mini, slot should be a value from 1-4 but it was {}",
+                        "For the Moduline M1, slot should be a value from 1-4 but it was {}",
                         slot
                     );
                     return None;
@@ -364,7 +364,7 @@ impl Module {
                         get_interrupt("/dev/gpiochip0", 0, slot)?,
                     ),
                     _ => {
-                        eprintln!("For the Moduline Display, slot should be a value from 1-2 but it was {}",slot);
+                        eprintln!("For the Moduline HMI1, slot should be a value from 1-2 but it was {}",slot);
                         return None;
                     }
                 }
@@ -1525,11 +1525,11 @@ async fn main() {
 		err_n_die("Could not find a hardware description file, this feature is not supported by your hardware.");
 	});
 
-    let controller = if hardware_string.contains("Moduline IV") {
+    let controller = if hardware_string.contains("Moduline IV") || hardware_string.contains("Moduline L4") {
         ControllerTypes::ModulineIV
-    } else if hardware_string.contains("Moduline Mini") {
+    } else if hardware_string.contains("Moduline Mini") || hardware_string.contains("Moduline M1") {
         ControllerTypes::ModulineMini
-    } else if hardware_string.contains("Moduline Display") {
+    } else if hardware_string.contains("Moduline Display") || hardware_string.contains("Moduline HMI1") {
         ControllerTypes::ModulineDisplay
     } else {
         err_n_die(

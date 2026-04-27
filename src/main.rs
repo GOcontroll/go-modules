@@ -2,16 +2,23 @@ use std::{
     env,
     fmt::{Display, Write},
     fs::{self, File},
+    io::{self, IsTerminal, Write as _},
     mem,
     process::{exit, Command},
     time::Duration,
 };
 
+use crossterm::{
+    cursor,
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute, queue,
+    style::{Color, Print, ResetColor, SetForegroundColor},
+    terminal,
+};
+
 use futures::StreamExt;
 
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
-
-use inquire::{Confirm, Select};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
@@ -27,6 +34,130 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_banner() {
     println!("\x1b[38;2;255;102;0m  GOcontroll Module Manager  v{}\x1b[0m\n", VERSION);
+}
+
+const SEP: &str = "  ------------------------------------";
+
+fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bool) {
+    let mut stdout = io::stdout();
+    let total_lines = options.len() as u16 + 3;
+    if !first {
+        queue!(stdout, cursor::MoveUp(total_lines)).unwrap();
+    }
+    queue!(
+        stdout,
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        SetForegroundColor(Color::Cyan),
+        Print(format!("? {}\r\n", prompt)),
+        ResetColor,
+    )
+    .unwrap();
+    for (i, option) in options.iter().enumerate() {
+        queue!(stdout, terminal::Clear(terminal::ClearType::CurrentLine)).unwrap();
+        if i == selected {
+            queue!(
+                stdout,
+                SetForegroundColor(Color::Cyan),
+                Print(format!("  \u{25ba} {}\r\n", option)),
+                ResetColor,
+            )
+            .unwrap();
+        } else {
+            queue!(stdout, Print(format!("    {}\r\n", option))).unwrap();
+        }
+    }
+    queue!(
+        stdout,
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        Print(format!("{}\r\n", SEP)),
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        SetForegroundColor(Color::DarkGrey),
+        Print("  \u{2191}/\u{2193} navigate   Enter select\r\n"),
+        ResetColor,
+    )
+    .unwrap();
+    stdout.flush().unwrap();
+}
+
+fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn() -> !) -> T {
+    if !io::stdin().is_terminal() {
+        println!("{}", prompt);
+        for (i, opt) in options.iter().enumerate() {
+            println!("  {}. {}", i + 1, opt);
+        }
+        loop {
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_err() {
+                return options.remove(0);
+            }
+            if let Ok(n) = input.trim().parse::<usize>() {
+                if n >= 1 && n <= options.len() {
+                    return options.remove(n - 1);
+                }
+            }
+        }
+    }
+    let mut selected = 0usize;
+    terminal::enable_raw_mode().unwrap();
+    let _ = execute!(io::stdout(), cursor::Hide);
+    draw_menu(prompt, &options, selected, true);
+    loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code: KeyCode::Up, .. })) => {
+                if selected > 0 {
+                    selected -= 1;
+                }
+                draw_menu(prompt, &options, selected, false);
+            }
+            Ok(Event::Key(KeyEvent { code: KeyCode::Down, .. })) => {
+                if selected + 1 < options.len() {
+                    selected += 1;
+                }
+                draw_menu(prompt, &options, selected, false);
+            }
+            Ok(Event::Key(KeyEvent { code: KeyCode::Enter, .. })) => {
+                let _ = terminal::disable_raw_mode();
+                let _ = execute!(io::stdout(), cursor::Show);
+                return options.remove(selected);
+            }
+            Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }))
+            | Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })) => {
+                let _ = terminal::disable_raw_mode();
+                let _ = execute!(io::stdout(), cursor::Show);
+                on_cancel();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn run_confirm(prompt: &str, default: bool, on_cancel: impl Fn() -> !) -> bool {
+    if !io::stdin().is_terminal() {
+        return default;
+    }
+    let hint = if default { "[Y/n]" } else { "[y/N]" };
+    print!("  {} {} ", prompt, hint);
+    io::stdout().flush().unwrap();
+    let mut input = String::new();
+    match io::stdin().read_line(&mut input) {
+        Ok(_) => {
+            let t = input.trim().to_lowercase();
+            if t.is_empty() {
+                default
+            } else {
+                t == "y" || t == "yes"
+            }
+        }
+        Err(_) => on_cancel(),
+    }
 }
 
 const DUMMY_MESSAGE: [u8; 5] = [0; 5];
@@ -1574,10 +1705,11 @@ async fn main() {
 
     let available_firmwares: Vec<FirmwareVersion> = if fs::metadata(FIRMWARE_DIR).is_err() {
         println!("No firmware found on this controller.");
-        let download = Confirm::new("Do you want to download the latest firmware?")
-            .with_default(true)
-            .prompt()
-            .unwrap_or(false);
+        let download = run_confirm(
+            "Do you want to download the latest firmware?",
+            true,
+            || err_n_restart_services(nodered, simulink),
+        );
         if download {
             if let Err(e) = check_firmware(false).await {
                 eprintln!("Error downloading firmware: {e}");
@@ -1611,7 +1743,7 @@ async fn main() {
             }
         }
     } else {
-        Select::new(
+        run_select(
             "What do you want to do?",
             vec![
                 CommandArg::Scan,
@@ -1619,9 +1751,8 @@ async fn main() {
                 CommandArg::Overwrite,
                 CommandArg::Check,
             ],
+            || err_n_restart_services(nodered, simulink),
         )
-        .prompt()
-        .unwrap_or_else(|_| err_n_restart_services(nodered, simulink))
     };
 
     // If the user selected Check from the TUI, run it and exit cleanly
@@ -1705,10 +1836,11 @@ async fn main() {
                     }
                 }
             } else {
-                match Select::new("Update one module or all?", vec!["all", "one"])
-                    .prompt()
-                    .unwrap_or_else(|_| err_n_restart_services(nodered, simulink))
-                {
+                match run_select(
+                    "Update one module or all?",
+                    vec!["all", "one"],
+                    || err_n_restart_services(nodered, simulink),
+                ) {
                     "all" => {
                         update_all_modules(
                             modules,
@@ -1723,26 +1855,21 @@ async fn main() {
                     }
                     "one" => {
                         if !modules.is_empty() {
-                            match Select::new("select a module to update", modules)
-                                .with_page_size(8)
-                                .prompt()
-                            {
-                                Ok(module) => {
-                                    update_one_module(
-                                        module,
-                                        &available_firmwares,
-                                        multi_progress,
-                                        style,
-                                        controller,
-                                        nodered,
-                                        simulink,
-                                    )
-                                    .await
-                                }
-                                Err(_) => {
-                                    err_n_restart_services(nodered, simulink);
-                                }
-                            }
+                            let module = run_select(
+                                "Select a module to update",
+                                modules,
+                                || err_n_restart_services(nodered, simulink),
+                            );
+                            update_one_module(
+                                module,
+                                &available_firmwares,
+                                multi_progress,
+                                style,
+                                controller,
+                                nodered,
+                                simulink,
+                            )
+                            .await
                         } else {
                             eprintln!("No modules found in the controller.");
                             err_n_restart_services(nodered, simulink);
@@ -1772,10 +1899,7 @@ async fn main() {
                     err_n_restart_services(nodered, simulink);
                 }
             } else if !modules.is_empty() {
-                Select::new(SLOT_PROMPT, modules)
-                    .with_page_size(8)
-                    .prompt()
-                    .unwrap_or_else(|_| err_n_restart_services(nodered, simulink))
+                run_select(SLOT_PROMPT, modules, || err_n_restart_services(nodered, simulink))
             } else {
                 eprintln!("No modules found in the controller.");
                 err_n_restart_services(nodered, simulink);
@@ -1799,9 +1923,11 @@ async fn main() {
                     .filter(|firmware| firmware.get_hardware() == module.firmware.get_hardware())
                     .collect();
                 if !valid_firmwares.is_empty() {
-                    *Select::new("Which firmware to upload?", valid_firmwares)
-                        .prompt()
-                        .unwrap_or_else(|_| err_n_restart_services(nodered, simulink))
+                    *run_select(
+                        "Which firmware to upload?",
+                        valid_firmwares,
+                        || err_n_restart_services(nodered, simulink),
+                    )
                 } else {
                     eprintln!("No firmware(s) found for this module.");
                     err_n_restart_services(nodered, simulink);

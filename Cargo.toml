@@ -1,6 +1,6 @@
 [package]
 name = "go-modules"
-version = "3.0.7"
+version = "3.0.8"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/GOcontroll/go-modules"
@@ -25,7 +25,7 @@ codegen-units = 1
 
 [dependencies]
 spidev = "0.6"
-inquire = "0.7.5"
+crossterm = "0.28"
 indicatif = "0.17.9"
 ctrlc = "3.4.5"
 tokio = { version = "1.43.0", features = ["rt", "macros", "time", "rt-multi-thread"]}

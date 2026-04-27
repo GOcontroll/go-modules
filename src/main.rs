@@ -19,19 +19,14 @@ use tokio::{task, task::JoinSet, time, time::timeout};
 
 use gpio_cdev::{AsyncLineEventHandle, Chip, EventRequestFlags, LineRequestFlags};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use sha2::{Digest, Sha256};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_banner() {
-    let text = format!("  GOcontroll Module Manager  V{}  ", VERSION);
-    let w = text.len().max(60);
-    println!("╔{}╗", "═".repeat(w));
-    println!("║{:<width$}║", text, width = w);
-    println!("╚{}╝", "═".repeat(w));
-    println!();
+    println!("\x1b[38;5;214mGOcontroll Module Manager  V{}\x1b[0m\n", VERSION);
 }
 
 const DUMMY_MESSAGE: [u8; 5] = [0; 5];
@@ -162,29 +157,13 @@ enum ControllerTypes {
     ModulineDisplay = 3,
 }
 
-impl ControllerTypes {
-    fn get_empty_modules_file(&self) -> String {
-        match self {
-            Self::ModulineIV => String::from(
-                ":::::::
-:::::::
-:::::::
-:::::::",
-            ),
-            Self::ModulineMini => String::from(
-                ":::
-:::
-:::
-:::",
-            ),
-            Self::ModulineDisplay => String::from(
-                ":
-:
-:
-:",
-            ),
-        }
-    }
+#[derive(Serialize, Deserialize)]
+struct SlotInfo {
+    slot: u8,
+    firmware: String,
+    manufacturer: u32,
+    qr_front: u32,
+    qr_back: u32,
 }
 
 struct Module {
@@ -1022,11 +1001,9 @@ fn print_data_row(widths: &[usize], cells: &[String]) {
 }
 
 fn print_module_table(modules: &[Module]) {
-    let headers = [
-        "Slot", "Type", "HW", "SW Version", "Manufacturer", "QR Front", "QR Back",
-    ];
+    let headers = ["Slot", "Type", "HW", "SW Version"];
 
-    let rows: Vec<[String; 7]> = modules
+    let rows: Vec<[String; 4]> = modules
         .iter()
         .map(|m| {
             let hw = m.firmware.get_hardware();
@@ -1036,9 +1013,6 @@ fn print_module_table(modules: &[Module]) {
                 m.type_name().to_string(),
                 hw[3].to_string(),
                 format!("{}.{}.{}", sw[0], sw[1], sw[2]),
-                m.manufacturer.to_string(),
-                m.qr_front.to_string(),
-                m.qr_back.to_string(),
             ]
         })
         .collect();
@@ -1320,78 +1294,77 @@ async fn get_modules_and_save(controller: ControllerTypes) -> Vec<Module> {
     save_modules(modules_out, &controller)
 }
 
-/// save all the modules to modules to /lib/firmware/gocontroll/modules, None elements will be removed from the file
+/// save all modules to /lib/firmware/gocontroll/modules.json and /usr/module-firmware/modules.txt
 fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> Vec<Module> {
-    let modules_string =
-        if let Ok(contents) = std::fs::read_to_string("/lib/firmware/gocontroll/modules") {
-            if contents.split('\n').count() == 4 {
-                // for some reason the file from older systems is messed up sometimes
-                contents
-            } else {
-                if std::fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
-                    eprintln!("Could not create /lib/firmware/gocontroll/");
-                }
-                controller.get_empty_modules_file()
-            }
-        } else {
-            if std::fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
-                eprintln!("Could not create /lib/firmware/gocontroll/");
-            }
-            //if the file doesn't exist, generate a new template
-            controller.get_empty_modules_file()
-        };
-    let mut lines: Vec<String> = modules_string
-        .split('\n')
-        .map(|element| element.to_owned())
-        .collect();
-    let mut firmwares: Vec<String> = lines
-        .get_mut(0)
-        .unwrap()
-        .split(':')
-        .map(|element| element.to_owned())
-        .collect();
-    let mut manufactures: Vec<String> = lines
-        .get_mut(1)
-        .unwrap()
-        .split(':')
-        .map(|element| element.to_owned())
-        .collect();
-    let mut front_qrs: Vec<String> = lines
-        .get_mut(2)
-        .unwrap()
-        .split(':')
-        .map(|element| element.to_owned())
-        .collect();
-    let mut rear_qrs: Vec<String> = lines
-        .get_mut(3)
-        .unwrap()
-        .split(':')
-        .map(|element| element.to_owned())
-        .collect();
+    let slot_count = match controller {
+        ControllerTypes::ModulineIV => 8usize,
+        ControllerTypes::ModulineMini => 4usize,
+        ControllerTypes::ModulineDisplay => 2usize,
+    };
+
+    let mut slots: Vec<SlotInfo> = fs::read_to_string("/lib/firmware/gocontroll/modules.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<SlotInfo>>(&s).ok())
+        .filter(|v| v.len() == slot_count)
+        .unwrap_or_else(|| {
+            (1..=slot_count as u8)
+                .map(|s| SlotInfo {
+                    slot: s,
+                    firmware: String::new(),
+                    manufacturer: 0,
+                    qr_front: 0,
+                    qr_back: 0,
+                })
+                .collect()
+        });
 
     for (i, module) in modules.iter().enumerate() {
         if let Some(module) = module {
-            *firmwares.get_mut((module.slot - 1) as usize).unwrap() = module.firmware.as_string();
-            *manufactures.get_mut((module.slot - 1) as usize).unwrap() =
-                format!("{}", module.manufacturer);
-            *front_qrs.get_mut((module.slot - 1) as usize).unwrap() =
-                format!("{}", module.qr_front);
-            *rear_qrs.get_mut((module.slot - 1) as usize).unwrap() = format!("{}", module.qr_back);
+            if let Some(info) = slots.iter_mut().find(|s| s.slot == module.slot) {
+                info.firmware = module.firmware.as_string();
+                info.manufacturer = module.manufacturer;
+                info.qr_front = module.qr_front;
+                info.qr_back = module.qr_back;
+            }
         } else {
-            *firmwares.get_mut(i).unwrap() = "".to_string();
-            *manufactures.get_mut(i).unwrap() = "".to_string();
-            *front_qrs.get_mut(i).unwrap() = "".to_string();
-            *rear_qrs.get_mut(i).unwrap() = "".to_string();
+            let slot_num = (i + 1) as u8;
+            if let Some(info) = slots.iter_mut().find(|s| s.slot == slot_num) {
+                info.firmware = String::new();
+                info.manufacturer = 0;
+                info.qr_front = 0;
+                info.qr_back = 0;
+            }
         }
     }
-    lines[0] = firmwares.join(":");
-    lines[1] = manufactures.join(":");
-    lines[2] = front_qrs.join(":");
-    lines[3] = rear_qrs.join(":");
 
-    if std::fs::write("/lib/firmware/gocontroll/modules", lines.join("\n")).is_err() {
-        eprintln!("Could not save new layout to /lib/firmware/gocontroll/modules")
+    // Write JSON to /lib/firmware/gocontroll/modules.json
+    if fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
+        eprintln!("Could not create /lib/firmware/gocontroll/");
     }
+    match serde_json::to_string_pretty(&slots) {
+        Ok(json) => {
+            if fs::write("/lib/firmware/gocontroll/modules.json", json).is_err() {
+                eprintln!("Could not save module layout to /lib/firmware/gocontroll/modules.json");
+            }
+        }
+        Err(e) => eprintln!("Could not serialize module layout: {}", e),
+    }
+
+    // Write legacy text format to /usr/module-firmware/modules.txt for older Node-RED
+    if fs::create_dir_all("/usr/module-firmware/").is_err() {
+        eprintln!("Could not create /usr/module-firmware/");
+    }
+    let text_content = format!(
+        "{}\n{}\n{}\n{}",
+        slots.iter().map(|s| s.firmware.as_str()).collect::<Vec<_>>().join(":"),
+        slots.iter().map(|s| s.manufacturer.to_string()).collect::<Vec<_>>().join(":"),
+        slots.iter().map(|s| s.qr_front.to_string()).collect::<Vec<_>>().join(":"),
+        slots.iter().map(|s| s.qr_back.to_string()).collect::<Vec<_>>().join(":"),
+    );
+    if fs::write("/usr/module-firmware/modules.txt", text_content).is_err() {
+        eprintln!("Could not save module layout to /usr/module-firmware/modules.txt");
+    }
+
     modules.into_iter().flatten().collect()
 }
 

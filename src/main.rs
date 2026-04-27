@@ -79,7 +79,7 @@ fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bo
     stdout.flush().unwrap();
 }
 
-fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn() -> !) -> T {
+fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn()) -> T {
     if !io::stdin().is_terminal() {
         println!("{}", prompt);
         for (i, opt) in options.iter().enumerate() {
@@ -133,13 +133,14 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn(
                 let _ = terminal::disable_raw_mode();
                 let _ = execute!(io::stdout(), cursor::Show);
                 on_cancel();
+                unreachable!()
             }
             _ => {}
         }
     }
 }
 
-fn run_confirm(prompt: &str, default: bool, on_cancel: impl Fn() -> !) -> bool {
+fn run_confirm(prompt: &str, default: bool, on_cancel: impl Fn()) -> bool {
     if !io::stdin().is_terminal() {
         return default;
     }
@@ -156,7 +157,10 @@ fn run_confirm(prompt: &str, default: bool, on_cancel: impl Fn() -> !) -> bool {
                 t == "y" || t == "yes"
             }
         }
-        Err(_) => on_cancel(),
+        Err(_) => {
+            on_cancel();
+            unreachable!()
+        }
     }
 }
 
@@ -1678,7 +1682,7 @@ async fn main() {
             .status();
     }
 
-    match ctrlc::set_handler(move || err_n_restart_services(nodered, simulink)) {
+    match ctrlc::set_handler(move || { err_n_restart_services(nodered, simulink); }) {
         Ok(()) => (),
         Err(err) => {
             eprintln!("couldn't set sigint handler: {}", err);
@@ -1708,7 +1712,7 @@ async fn main() {
         let download = run_confirm(
             "Do you want to download the latest firmware?",
             true,
-            || err_n_restart_services(nodered, simulink),
+            || { err_n_restart_services(nodered, simulink); },
         );
         if download {
             if let Err(e) = check_firmware(false).await {
@@ -1751,7 +1755,7 @@ async fn main() {
                 CommandArg::Overwrite,
                 CommandArg::Check,
             ],
-            || err_n_restart_services(nodered, simulink),
+            || { err_n_restart_services(nodered, simulink); },
         )
     };
 
@@ -1839,7 +1843,7 @@ async fn main() {
                 match run_select(
                     "Update one module or all?",
                     vec!["all", "one"],
-                    || err_n_restart_services(nodered, simulink),
+                    || { err_n_restart_services(nodered, simulink); },
                 ) {
                     "all" => {
                         update_all_modules(
@@ -1858,7 +1862,7 @@ async fn main() {
                             let module = run_select(
                                 "Select a module to update",
                                 modules,
-                                || err_n_restart_services(nodered, simulink),
+                                || { err_n_restart_services(nodered, simulink); },
                             );
                             update_one_module(
                                 module,
@@ -1899,7 +1903,7 @@ async fn main() {
                     err_n_restart_services(nodered, simulink);
                 }
             } else if !modules.is_empty() {
-                run_select(SLOT_PROMPT, modules, || err_n_restart_services(nodered, simulink))
+                run_select(SLOT_PROMPT, modules, || { err_n_restart_services(nodered, simulink); })
             } else {
                 eprintln!("No modules found in the controller.");
                 err_n_restart_services(nodered, simulink);
@@ -1926,7 +1930,7 @@ async fn main() {
                     *run_select(
                         "Which firmware to upload?",
                         valid_firmwares,
-                        || err_n_restart_services(nodered, simulink),
+                        || { err_n_restart_services(nodered, simulink); },
                     )
                 } else {
                     eprintln!("No firmware(s) found for this module.");

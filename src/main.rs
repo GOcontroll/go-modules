@@ -33,12 +33,12 @@ use sha2::{Digest, Sha256};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_banner() {
-    println!("\x1b[38;2;255;102;0m  GOcontroll Module Manager  v{}\x1b[0m\n", VERSION);
+    println!("\x1b[38;2;255;102;0m  GOcontroll Module Manager  v{}\x1b[0m", VERSION);
 }
 
 const SEP: &str = "  ------------------------------------";
 
-fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bool) {
+fn draw_menu<T: Display>(options: &[T], selected: usize, first: bool) {
     let mut stdout = io::stdout();
     let total_lines = options.len() as u16 + 3;
     if !first {
@@ -47,9 +47,7 @@ fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bo
     queue!(
         stdout,
         terminal::Clear(terminal::ClearType::CurrentLine),
-        SetForegroundColor(Color::Cyan),
-        Print(format!("? {}\r\n", prompt)),
-        ResetColor,
+        Print(format!("{}\r\n", SEP)),
     )
     .unwrap();
     for (i, option) in options.iter().enumerate() {
@@ -72,7 +70,7 @@ fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bo
         Print(format!("{}\r\n", SEP)),
         terminal::Clear(terminal::ClearType::CurrentLine),
         SetForegroundColor(Color::DarkGrey),
-        Print("  \u{2191}/\u{2193} navigate   Enter select\r\n"),
+        Print("  \u{2191}/\u{2193} navigate   Enter select   q quit\r\n"),
         ResetColor,
     )
     .unwrap();
@@ -100,27 +98,28 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn(
     let mut selected = 0usize;
     terminal::enable_raw_mode().unwrap();
     let _ = execute!(io::stdout(), cursor::Hide);
-    draw_menu(prompt, &options, selected, true);
+    draw_menu(&options, selected, true);
     loop {
         match event::read() {
             Ok(Event::Key(KeyEvent { code: KeyCode::Up, .. })) => {
                 if selected > 0 {
                     selected -= 1;
                 }
-                draw_menu(prompt, &options, selected, false);
+                draw_menu(&options, selected, false);
             }
             Ok(Event::Key(KeyEvent { code: KeyCode::Down, .. })) => {
                 if selected + 1 < options.len() {
                     selected += 1;
                 }
-                draw_menu(prompt, &options, selected, false);
+                draw_menu(&options, selected, false);
             }
             Ok(Event::Key(KeyEvent { code: KeyCode::Enter, .. })) => {
                 let _ = terminal::disable_raw_mode();
                 let _ = execute!(io::stdout(), cursor::Show);
                 return options.remove(selected);
             }
-            Ok(Event::Key(KeyEvent {
+            Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }))
+            | Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -1613,6 +1612,7 @@ async fn update_all_modules(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
 async fn main() {
+    let _ = execute!(io::stdout(), terminal::Clear(terminal::ClearType::All), cursor::MoveTo(0, 0));
     print_banner();
     #[cfg(debug_assertions)]
     println!("Debug version");

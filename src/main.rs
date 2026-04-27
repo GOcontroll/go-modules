@@ -26,12 +26,7 @@ use sha2::{Digest, Sha256};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_banner() {
-    let text = format!("  GOcontroll Module Manager  V{}  ", VERSION);
-    let w = text.len().max(60);
-    println!("╔{}╗", "═".repeat(w));
-    println!("║{:<width$}║", text, width = w);
-    println!("╚{}╝", "═".repeat(w));
-    println!();
+    println!("\x1b[38;2;255;102;0m  GOcontroll Module Manager  v{}\x1b[0m\n", VERSION);
 }
 
 const DUMMY_MESSAGE: [u8; 5] = [0; 5];

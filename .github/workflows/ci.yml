@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (aarch64)
+        run: cross build --release --target aarch64-unknown-linux-gnu
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-modules-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/go-modules
+          if-no-files-found: error

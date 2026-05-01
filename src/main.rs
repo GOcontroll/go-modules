@@ -38,14 +38,19 @@ fn print_banner() {
 
 const SEP: &str = "  ------------------------------------";
 
-fn draw_menu<T: Display>(options: &[T], selected: usize, first: bool) {
+fn draw_menu<T: Display>(prompt: &str, options: &[T], selected: usize, first: bool) {
     let mut stdout = io::stdout();
-    let total_lines = options.len() as u16 + 3;
+    // 3 separator lines + prompt + footer + one line per option
+    let total_lines = options.len() as u16 + 5;
     if !first {
         queue!(stdout, cursor::MoveUp(total_lines)).unwrap();
     }
     queue!(
         stdout,
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        Print(format!("{}\r\n", SEP)),
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        Print(format!("    {}\r\n", prompt)),
         terminal::Clear(terminal::ClearType::CurrentLine),
         Print(format!("{}\r\n", SEP)),
     )
@@ -70,14 +75,16 @@ fn draw_menu<T: Display>(options: &[T], selected: usize, first: bool) {
         Print(format!("{}\r\n", SEP)),
         terminal::Clear(terminal::ClearType::CurrentLine),
         SetForegroundColor(Color::DarkGrey),
-        Print("  \u{2191}/\u{2193} navigate   Enter select   q quit\r\n"),
+        Print("  \u{2191}/\u{2193} navigate   Enter select   \u{2190} back   Esc quit\r\n"),
         ResetColor,
     )
     .unwrap();
     stdout.flush().unwrap();
 }
 
-fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn()) -> T {
+/// Returns `Some(item)` on Enter, `None` on Left/q (back to parent menu),
+/// and calls `on_cancel` (which never returns) on Esc, Ctrl-C or Ctrl-D.
+fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn()) -> Option<T> {
     if !io::stdin().is_terminal() {
         println!("{}", prompt);
         for (i, opt) in options.iter().enumerate() {
@@ -86,11 +93,11 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn(
         loop {
             let mut input = String::new();
             if io::stdin().read_line(&mut input).is_err() {
-                return options.remove(0);
+                return Some(options.remove(0));
             }
             if let Ok(n) = input.trim().parse::<usize>() {
                 if n >= 1 && n <= options.len() {
-                    return options.remove(n - 1);
+                    return Some(options.remove(n - 1));
                 }
             }
         }
@@ -98,27 +105,33 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn(
     let mut selected = 0usize;
     terminal::enable_raw_mode().unwrap();
     let _ = execute!(io::stdout(), cursor::Hide);
-    draw_menu(&options, selected, true);
+    draw_menu(prompt, &options, selected, true);
     loop {
         match event::read() {
             Ok(Event::Key(KeyEvent { code: KeyCode::Up, .. })) => {
                 if selected > 0 {
                     selected -= 1;
                 }
-                draw_menu(&options, selected, false);
+                draw_menu(prompt, &options, selected, false);
             }
             Ok(Event::Key(KeyEvent { code: KeyCode::Down, .. })) => {
                 if selected + 1 < options.len() {
                     selected += 1;
                 }
-                draw_menu(&options, selected, false);
+                draw_menu(prompt, &options, selected, false);
             }
             Ok(Event::Key(KeyEvent { code: KeyCode::Enter, .. })) => {
                 let _ = terminal::disable_raw_mode();
                 let _ = execute!(io::stdout(), cursor::Show);
-                return options.remove(selected);
+                return Some(options.remove(selected));
             }
-            Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }))
+            Ok(Event::Key(KeyEvent { code: KeyCode::Left, .. }))
+            | Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) => {
+                let _ = terminal::disable_raw_mode();
+                let _ = execute!(io::stdout(), cursor::Show);
+                return None;
+            }
+            Ok(Event::Key(KeyEvent { code: KeyCode::Esc, .. }))
             | Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
@@ -137,6 +150,51 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, on_cancel: impl Fn(
             _ => {}
         }
     }
+}
+
+/// Clear the screen and draw the banner + module overview table (TUI top-of-loop).
+fn redraw_main(modules: &[Module]) {
+    let _ = execute!(
+        io::stdout(),
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0)
+    );
+    print_banner();
+    if modules.is_empty() {
+        println!("  No modules detected");
+    } else {
+        print_module_table(modules);
+    }
+}
+
+/// Clear the screen and draw the banner + the chosen action's name framed by
+/// two separator lines, so action output appears below a consistent header.
+fn draw_action_header(title: &str) {
+    let _ = execute!(
+        io::stdout(),
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0)
+    );
+    print_banner();
+    println!("{}", SEP);
+    println!("    {}", title);
+    println!("{}", SEP);
+}
+
+/// Pause until the user presses any key. Used between an action's output and
+/// the next main-menu redraw.
+fn wait_for_continue() {
+    println!();
+    print!("\x1b[90m  Press any key to return to menu...\x1b[0m");
+    io::stdout().flush().unwrap();
+    if !io::stdin().is_terminal() {
+        println!();
+        return;
+    }
+    let _ = terminal::enable_raw_mode();
+    let _ = event::read();
+    let _ = terminal::disable_raw_mode();
+    println!();
 }
 
 fn run_confirm(prompt: &str, default: bool, on_cancel: impl Fn()) -> bool {
@@ -1508,9 +1566,7 @@ async fn update_one_module(
     multi_progress: MultiProgress,
     style: ProgressStyle,
     controller: ControllerTypes,
-    nodered: bool,
-    simulink: bool,
-) -> ! {
+) {
     match module
         .update_module(available_firmwares, multi_progress, style)
         .await
@@ -1522,17 +1578,13 @@ async fn update_one_module(
                 module.firmware.as_string()
             );
             save_modules(vec![Some(module)], &controller);
-            success(nodered, simulink);
         }
         Err(err) => match err {
             UploadError::FirmwareCorrupted(slot) => {
-                err_n_die(
-                    format!("Update failed, firmware is corrupted on slot {}", slot).as_str(),
-                );
+                eprintln!("Update failed, firmware is corrupted on slot {}", slot);
             }
             UploadError::FirmwareUntouched(slot) => {
                 eprintln!("Update failed on slot {}", slot);
-                err_n_restart_services(nodered, simulink);
             }
         },
         Ok(Err(module)) => {
@@ -1541,7 +1593,6 @@ async fn update_one_module(
                 module.slot,
                 module.firmware.as_string()
             );
-            err_n_restart_services(nodered, simulink);
         }
     }
 }
@@ -1552,9 +1603,7 @@ async fn update_all_modules(
     multi_progress: &MultiProgress,
     style: &ProgressStyle,
     controller: ControllerTypes,
-    nodered: bool,
-    simulink: bool,
-) -> ! {
+) {
     let mut upload_results = Vec::with_capacity(modules.len());
     let mut new_modules = Vec::with_capacity(modules.len());
     let mut firmware_corrupted = false;
@@ -1604,10 +1653,11 @@ async fn update_all_modules(
     }
     save_modules(new_modules, &controller);
     if firmware_corrupted {
-        err_n_die("could not restart nodered and go-simulink services due to corrupted firmware.");
+        eprintln!(
+            "One or more modules have corrupted firmware. Use Overwrite to flash a known-good \
+             image before exiting; nodered and go-simulink will stay stopped until you quit."
+        );
     }
-
-    success(nodered, simulink);
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
@@ -1736,8 +1786,9 @@ async fn main() {
             write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
         });
 
-    let command = if let Some(arg) = env::args().nth(1) {
-        match arg.as_str() {
+    // ── CLI mode: a command argument was provided → one-shot, exit at end. ──
+    if let Some(arg) = env::args().nth(1) {
+        let cli_command = match arg.as_str() {
             "scan" => CommandArg::Scan,
             "update" => CommandArg::Update,
             "overwrite" => CommandArg::Overwrite,
@@ -1745,234 +1796,350 @@ async fn main() {
                 eprintln!("Invalid command entered {}\n{}", arg, USAGE);
                 err_n_restart_services(nodered, simulink);
             }
+        };
+
+        let modules = modules_fut.await.unwrap_or_else(|_| {
+            eprintln!("Could not get module information");
+            err_n_restart_services(nodered, simulink);
+        });
+
+        match cli_command {
+            CommandArg::Scan => {
+                if !modules.is_empty() {
+                    print_module_table(&modules);
+                } else {
+                    println!("No modules found")
+                }
+                success(nodered, simulink);
+            }
+            CommandArg::Update => {
+                if let Some(arg) = env::args().nth(2) {
+                    match arg.as_str() {
+                        "all" => {
+                            update_all_modules(
+                                modules,
+                                &available_firmwares,
+                                &multi_progress,
+                                &style,
+                                controller,
+                            )
+                            .await
+                        }
+                        _ => {
+                            if let Ok(slot) = arg.parse::<u8>() {
+                                let module = modules
+                                    .into_iter()
+                                    .find(|module| module.slot == slot)
+                                    .take()
+                                    .unwrap_or_else(|| {
+                                        eprintln!("Couldn't find a module in slot {}", slot);
+                                        err_n_restart_services(nodered, simulink);
+                                    });
+                                update_one_module(
+                                    module,
+                                    &available_firmwares,
+                                    multi_progress,
+                                    style,
+                                    controller,
+                                )
+                                .await;
+                            } else {
+                                eprintln!("{}", USAGE);
+                                err_n_restart_services(nodered, simulink);
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("{}", USAGE);
+                    err_n_restart_services(nodered, simulink);
+                }
+                success(nodered, simulink);
+            }
+            CommandArg::Overwrite => {
+                let mut module = if let Some(arg) = env::args().nth(2) {
+                    if let Ok(slot) = arg.parse::<u8>() {
+                        modules
+                            .into_iter()
+                            .find(|module| module.slot == slot)
+                            .take()
+                            .unwrap_or_else(|| {
+                                eprintln!("Couldn't find a module in slot {}", slot);
+                                err_n_restart_services(nodered, simulink);
+                            })
+                    } else {
+                        eprintln!("Invalid slot entered\n{}", USAGE);
+                        err_n_restart_services(nodered, simulink);
+                    }
+                } else {
+                    eprintln!("{}", USAGE);
+                    err_n_restart_services(nodered, simulink);
+                };
+
+                let new_firmware = if let Some(arg) = env::args().nth(3) {
+                    if let Some(firmware) = FirmwareVersion::from_filename(arg.clone()) {
+                        if available_firmwares.contains(&firmware) {
+                            firmware
+                        } else {
+                            eprintln!("{}{} does not exist", FIRMWARE_DIR, arg);
+                            err_n_restart_services(nodered, simulink);
+                        }
+                    } else {
+                        eprintln!("Invalid firmware entered\n{}", USAGE);
+                        err_n_restart_services(nodered, simulink);
+                    }
+                } else {
+                    eprintln!("{}", USAGE);
+                    err_n_restart_services(nodered, simulink);
+                };
+
+                match module
+                    .overwrite_module(&new_firmware, multi_progress, style)
+                    .await
+                {
+                    Ok(()) => {
+                        println!(
+                            "Successfully updated slot {} from {} to {}",
+                            module.slot,
+                            module.firmware.as_string(),
+                            new_firmware.as_string()
+                        );
+                        module.firmware = new_firmware;
+                        save_modules(vec![Some(module)], &controller);
+                        success(nodered, simulink);
+                    }
+                    Err(err) => match err {
+                        UploadError::FirmwareCorrupted(slot) => {
+                            eprintln!(
+                                "firmware upload critically failed on slot {}, wiping firmware...",
+                                slot
+                            );
+                            module.wipe_module_error().await;
+                            err_n_die(
+                                format!("Update failed, firmware is corrupted on slot {}", slot)
+                                    .as_str(),
+                            );
+                        }
+                        UploadError::FirmwareUntouched(slot) => {
+                            eprintln!("Update failed on slot {}", slot);
+                            err_n_restart_services(nodered, simulink);
+                        }
+                    },
+                }
+            }
+            CommandArg::Check => unreachable!(),
         }
-    } else {
-        run_select(
-            "What do you want to do?",
+    }
+
+    // ── TUI mode: persistent loop until the user quits with Esc / Ctrl-C / Ctrl-D. ──
+    // Drop the speculative modules_fut — we re-scan at the top of every iteration so
+    // the table reflects state after each update/overwrite.
+    drop(modules_fut);
+
+    loop {
+        let modules = get_modules_and_save(controller).await;
+        redraw_main(&modules);
+
+        let cmd = run_select(
+            "Select what you want to do",
             vec![
                 CommandArg::Scan,
                 CommandArg::Update,
                 CommandArg::Overwrite,
                 CommandArg::Check,
             ],
-            || { err_n_restart_services(nodered, simulink); },
-        )
+            || err_n_restart_services(nodered, simulink),
+        );
+        let cmd = match cmd {
+            Some(c) => c,
+            None => continue, // ← / q at the root menu just re-renders
+        };
+
+        draw_action_header(&format!("{}", cmd));
+
+        let action_ran = match cmd {
+            CommandArg::Scan => {
+                // Module overview is already shown in the redraw_main; the dedicated
+                // scan action prints the columns from § 7.1 of the apt look-and-feel spec.
+                if modules.is_empty() {
+                    println!("  No modules detected");
+                } else {
+                    println!("  Slot  Type                HW  SW Version");
+                    for m in &modules {
+                        let hw = m.firmware.get_hardware();
+                        let sw = m.firmware.get_software();
+                        println!(
+                            "  {:<5} {:<19} {:<3} {}.{}.{}",
+                            m.slot,
+                            m.type_name(),
+                            hw[3],
+                            sw[0],
+                            sw[1],
+                            sw[2],
+                        );
+                    }
+                }
+                true
+            }
+            CommandArg::Update => {
+                tui_update(
+                    modules,
+                    &available_firmwares,
+                    &multi_progress,
+                    &style,
+                    controller,
+                    nodered,
+                    simulink,
+                )
+                .await
+            }
+            CommandArg::Overwrite => {
+                tui_overwrite(
+                    modules,
+                    &available_firmwares,
+                    &multi_progress,
+                    &style,
+                    controller,
+                    nodered,
+                    simulink,
+                )
+                .await
+            }
+            CommandArg::Check => {
+                if let Err(e) = check_firmware(false).await {
+                    eprintln!("Error checking for firmware updates: {e}");
+                }
+                true
+            }
+        };
+
+        if action_ran {
+            wait_for_continue();
+        }
+    }
+}
+
+/// TUI sub-flow for the Update menu. Returns `true` if an update action was
+/// executed (so the caller should pause before redrawing the main menu), and
+/// `false` if the user backed out before any action ran.
+async fn tui_update(
+    modules: Vec<Module>,
+    available_firmwares: &[FirmwareVersion],
+    multi_progress: &MultiProgress,
+    style: &ProgressStyle,
+    controller: ControllerTypes,
+    nodered: bool,
+    simulink: bool,
+) -> bool {
+    let choice = match run_select(
+        "Update one module or all?",
+        vec!["all", "one"],
+        || err_n_restart_services(nodered, simulink),
+    ) {
+        Some(c) => c,
+        None => return false,
+    };
+    match choice {
+        "all" => {
+            update_all_modules(modules, available_firmwares, multi_progress, style, controller)
+                .await;
+            true
+        }
+        "one" => {
+            if modules.is_empty() {
+                eprintln!("No modules found in the controller.");
+                return true;
+            }
+            let module = match run_select(
+                "Select a module to update",
+                modules,
+                || err_n_restart_services(nodered, simulink),
+            ) {
+                Some(m) => m,
+                None => return false,
+            };
+            update_one_module(
+                module,
+                available_firmwares,
+                multi_progress.clone(),
+                style.clone(),
+                controller,
+            )
+            .await;
+            true
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// TUI sub-flow for the Overwrite menu. Returns `true` if an overwrite was
+/// executed, `false` if the user backed out.
+async fn tui_overwrite(
+    modules: Vec<Module>,
+    available_firmwares: &[FirmwareVersion],
+    multi_progress: &MultiProgress,
+    style: &ProgressStyle,
+    controller: ControllerTypes,
+    nodered: bool,
+    simulink: bool,
+) -> bool {
+    if modules.is_empty() {
+        eprintln!("No modules found in the controller.");
+        return true;
+    }
+    let mut module = match run_select(
+        SLOT_PROMPT,
+        modules,
+        || err_n_restart_services(nodered, simulink),
+    ) {
+        Some(m) => m,
+        None => return false,
     };
 
-    // If the user selected Check from the TUI, run it and exit cleanly
-    if let CommandArg::Check = command {
-        // Services were stopped — restart them before running check (check doesn't need them stopped)
-        if nodered {
-            _ = Command::new("systemctl")
-                .arg("start")
-                .arg("nodered")
-                .status();
-        }
-        if simulink {
-            _ = Command::new("systemctl")
-                .arg("start")
-                .arg("go-simulink")
-                .status();
-        }
-        if let Err(e) = check_firmware(false).await {
-            eprintln!("Error checking for firmware updates: {e}");
-            exit(1);
-        }
-        exit(0);
+    let valid_firmwares: Vec<FirmwareVersion> = available_firmwares
+        .iter()
+        .filter(|firmware| firmware.get_hardware() == module.firmware.get_hardware())
+        .copied()
+        .collect();
+    if valid_firmwares.is_empty() {
+        eprintln!("No firmware(s) found for this module.");
+        return true;
     }
+    let new_firmware = match run_select(
+        "Which firmware to upload?",
+        valid_firmwares,
+        || err_n_restart_services(nodered, simulink),
+    ) {
+        Some(f) => f,
+        None => return false,
+    };
 
-    //get the modules from the previously started task
-    let modules = modules_fut.await.unwrap_or_else(|_| {
-        eprintln!("Could not get module information");
-        err_n_restart_services(nodered, simulink);
-    });
-
-    match command {
-        CommandArg::Scan => {
-            if !modules.is_empty() {
-                print_module_table(&modules);
-            } else {
-                println!("No modules found")
+    match module
+        .overwrite_module(&new_firmware, multi_progress.clone(), style.clone())
+        .await
+    {
+        Ok(()) => {
+            println!(
+                "Successfully updated slot {} from {} to {}",
+                module.slot,
+                module.firmware.as_string(),
+                new_firmware.as_string()
+            );
+            module.firmware = new_firmware;
+            save_modules(vec![Some(module)], &controller);
+        }
+        Err(err) => match err {
+            UploadError::FirmwareCorrupted(slot) => {
+                eprintln!(
+                    "firmware upload critically failed on slot {}, wiping firmware...",
+                    slot
+                );
+                module.wipe_module_error().await;
+                eprintln!("Update failed, firmware is corrupted on slot {}", slot);
             }
-            success(nodered, simulink);
-        }
-
-        CommandArg::Update => {
-            //find the update type
-            if let Some(arg) = env::args().nth(2) {
-                match arg.as_str() {
-                    "all" => {
-                        update_all_modules(
-                            modules,
-                            &available_firmwares,
-                            &multi_progress,
-                            &style,
-                            controller,
-                            nodered,
-                            simulink,
-                        )
-                        .await
-                    }
-                    _ => {
-                        if let Ok(slot) = arg.parse::<u8>() {
-                            let module = modules
-                                .into_iter()
-                                .find(|module| module.slot == slot)
-                                .take()
-                                .unwrap_or_else(|| {
-                                    eprintln!("Couldn't find a module in slot {}", slot);
-                                    err_n_restart_services(nodered, simulink);
-                                });
-                            update_one_module(
-                                module,
-                                &available_firmwares,
-                                multi_progress,
-                                style,
-                                controller,
-                                nodered,
-                                simulink,
-                            )
-                            .await;
-                        } else {
-                            eprintln!("{}", USAGE);
-                            err_n_restart_services(nodered, simulink);
-                        }
-                    }
-                }
-            } else {
-                match run_select(
-                    "Update one module or all?",
-                    vec!["all", "one"],
-                    || { err_n_restart_services(nodered, simulink); },
-                ) {
-                    "all" => {
-                        update_all_modules(
-                            modules,
-                            &available_firmwares,
-                            &multi_progress,
-                            &style,
-                            controller,
-                            nodered,
-                            simulink,
-                        )
-                        .await
-                    }
-                    "one" => {
-                        if !modules.is_empty() {
-                            let module = run_select(
-                                "Select a module to update",
-                                modules,
-                                || { err_n_restart_services(nodered, simulink); },
-                            );
-                            update_one_module(
-                                module,
-                                &available_firmwares,
-                                multi_progress,
-                                style,
-                                controller,
-                                nodered,
-                                simulink,
-                            )
-                            .await
-                        } else {
-                            eprintln!("No modules found in the controller.");
-                            err_n_restart_services(nodered, simulink);
-                        }
-                    }
-                    _ => {
-                        eprintln!("You shouldn't be here, turn back to whence you came");
-                        err_n_restart_services(nodered, simulink);
-                    }
-                }
-            };
-        }
-
-        CommandArg::Overwrite => {
-            let mut module = if let Some(arg) = env::args().nth(2) {
-                if let Ok(slot) = arg.parse::<u8>() {
-                    modules
-                        .into_iter()
-                        .find(|module| module.slot == slot)
-                        .take()
-                        .unwrap_or_else(|| {
-                            eprintln!("Couldn't find a module in slot {}", slot);
-                            err_n_restart_services(nodered, simulink);
-                        })
-                } else {
-                    eprintln!("Invalid slot entered\n{}", USAGE);
-                    err_n_restart_services(nodered, simulink);
-                }
-            } else if !modules.is_empty() {
-                run_select(SLOT_PROMPT, modules, || { err_n_restart_services(nodered, simulink); })
-            } else {
-                eprintln!("No modules found in the controller.");
-                err_n_restart_services(nodered, simulink);
-            };
-
-            let new_firmware = if let Some(arg) = env::args().nth(3) {
-                if let Some(firmware) = FirmwareVersion::from_filename(arg.clone()) {
-                    if available_firmwares.contains(&firmware) {
-                        firmware
-                    } else {
-                        eprintln!("{}{} does not exist", FIRMWARE_DIR, arg);
-                        err_n_restart_services(nodered, simulink);
-                    }
-                } else {
-                    eprintln!("Invalid firmware entered\n{}", USAGE);
-                    err_n_restart_services(nodered, simulink);
-                }
-            } else {
-                let valid_firmwares: Vec<&FirmwareVersion> = available_firmwares
-                    .iter()
-                    .filter(|firmware| firmware.get_hardware() == module.firmware.get_hardware())
-                    .collect();
-                if !valid_firmwares.is_empty() {
-                    *run_select(
-                        "Which firmware to upload?",
-                        valid_firmwares,
-                        || { err_n_restart_services(nodered, simulink); },
-                    )
-                } else {
-                    eprintln!("No firmware(s) found for this module.");
-                    err_n_restart_services(nodered, simulink);
-                }
-            };
-            match module
-                .overwrite_module(&new_firmware, multi_progress, style)
-                .await
-            {
-                Ok(()) => {
-                    println!(
-                        "Successfully updated slot {} from {} to {}",
-                        module.slot,
-                        module.firmware.as_string(),
-                        new_firmware.as_string()
-                    );
-                    module.firmware = new_firmware;
-                    save_modules(vec![Some(module)], &controller);
-                    success(nodered, simulink);
-                }
-                Err(err) => match err {
-                    UploadError::FirmwareCorrupted(slot) => {
-                        eprintln!(
-                            "firmware upload critically failed on slot {}, wiping firmware...",
-                            slot
-                        );
-                        module.wipe_module_error().await;
-                        err_n_die(
-                            format!("Update failed, firmware is corrupted on slot {}", slot)
-                                .as_str(),
-                        );
-                    }
-                    UploadError::FirmwareUntouched(slot) => {
-                        eprintln!("Update failed on slot {}", slot);
-                        err_n_restart_services(nodered, simulink);
-                    }
-                },
+            UploadError::FirmwareUntouched(slot) => {
+                eprintln!("Update failed on slot {}", slot);
             }
-        }
-
-        // Check is handled earlier in main before this match, this arm is unreachable
-        CommandArg::Check => unreachable!(),
+        },
     }
+    true
 }

@@ -5,9 +5,15 @@ use std::{
     io::{self, IsTerminal, Write as _},
     mem,
     process::{exit, Command},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
+
+static NODERED_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
+static SIMULINK_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 
 use crossterm::{
     cursor,
@@ -82,7 +88,7 @@ fn draw_menu<T: Display>(options: &[T], selected: usize, first: bool, mode: Menu
         }
     }
     let hint = match mode {
-        MenuMode::Main => "  \u{2191}/\u{2193} navigate   Enter select   q quit\r\n",
+        MenuMode::Main => "  \u{2191}/\u{2193} navigate   Enter select   Esc quit\r\n",
         MenuMode::Sub => {
             "  \u{2191}/\u{2193} navigate   Enter select   \u{2190}/Esc back\r\n"
         }
@@ -98,6 +104,16 @@ fn draw_menu<T: Display>(options: &[T], selected: usize, first: bool, mode: Menu
     )
     .unwrap();
     stdout.flush().unwrap();
+}
+
+fn force_quit() -> ! {
+    let _ = terminal::disable_raw_mode();
+    let _ = execute!(io::stdout(), cursor::Show);
+    restart_services(
+        NODERED_WAS_RUNNING.load(Ordering::Relaxed),
+        SIMULINK_WAS_RUNNING.load(Ordering::Relaxed),
+    );
+    exit(-1);
 }
 
 fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, mode: MenuMode) -> SelectResult<T> {
@@ -148,15 +164,18 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, mode: MenuMode) -> 
                 cleanup();
                 return SelectResult::Selected(options.remove(selected));
             }
-            Ok(Event::Key(KeyEvent { code: KeyCode::Esc, .. }))
-            | Ok(Event::Key(KeyEvent { code: KeyCode::Left, .. }))
-                if mode == MenuMode::Sub =>
-            {
+            Ok(Event::Key(KeyEvent { code: KeyCode::Esc, .. })) => {
+                cleanup();
+                return match mode {
+                    MenuMode::Main => SelectResult::Quit,
+                    MenuMode::Sub => SelectResult::Back,
+                };
+            }
+            Ok(Event::Key(KeyEvent { code: KeyCode::Left, .. })) if mode == MenuMode::Sub => {
                 cleanup();
                 return SelectResult::Back;
             }
-            Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. }))
-            | Ok(Event::Key(KeyEvent {
+            Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
@@ -167,10 +186,7 @@ fn run_select<T: Display>(prompt: &str, mut options: Vec<T>, mode: MenuMode) -> 
                 ..
             })) => {
                 cleanup();
-                return match mode {
-                    MenuMode::Main => SelectResult::Quit,
-                    MenuMode::Sub => SelectResult::Back,
-                };
+                force_quit();
             }
             _ => {}
         }
@@ -204,16 +220,18 @@ fn show_view(lines: &[String]) {
     loop {
         match event::read() {
             Ok(Event::Key(KeyEvent {
-                code: KeyCode::Esc | KeyCode::Left | KeyCode::Enter | KeyCode::Char('q'),
-                ..
-            }))
-            | Ok(Event::Key(KeyEvent {
-                code: KeyCode::Char('c') | KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
+                code: KeyCode::Esc | KeyCode::Left | KeyCode::Enter,
                 ..
             })) => {
                 let _ = terminal::disable_raw_mode();
                 return;
+            }
+            Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('c') | KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            })) => {
+                force_quit();
             }
             _ => {}
         }
@@ -1698,14 +1716,19 @@ async fn update_all_modules(
 }
 
 /// Reset the screen so the next view starts at the top, then re-print the
-/// banner. Called between menu transitions so output stacks predictably.
-fn redraw_chrome() {
+/// banner and optional subtitle. Called between menu transitions so output
+/// stacks predictably. Pass an empty string to skip the subtitle line.
+fn redraw_chrome(subtitle: &str) {
     let _ = execute!(
         io::stdout(),
         terminal::Clear(terminal::ClearType::All),
         cursor::MoveTo(0, 0)
     );
     print_banner();
+    if !subtitle.is_empty() {
+        println!("{}", SEP);
+        println!("  {}", subtitle);
+    }
     #[cfg(debug_assertions)]
     println!("Debug version");
 }
@@ -1822,7 +1845,7 @@ async fn run_update_flow(
         };
     }
 
-    redraw_chrome();
+    redraw_chrome("Select your update method:");
     match run_select(
         "Update one module or all?",
         vec!["all", "one"],
@@ -1843,7 +1866,7 @@ async fn run_update_flow(
             if modules.is_empty() {
                 return (modules, vec!["No modules found in the controller.".into()]);
             }
-            redraw_chrome();
+            redraw_chrome("Select module to update:");
             match run_select("Select a module to update", modules, MenuMode::Sub) {
                 SelectResult::Selected(module) => {
                     let (returned, lines) = update_one_module(
@@ -1896,7 +1919,7 @@ async fn run_overwrite_flow(
     } else if remaining.is_empty() {
         return (remaining, vec!["No modules found in the controller.".into()]);
     } else {
-        redraw_chrome();
+        redraw_chrome("Select slot to overwrite:");
         match run_select(SLOT_PROMPT, remaining, MenuMode::Sub) {
             SelectResult::Selected(m) => {
                 // Sub-menu consumed the Vec; we no longer have access to the
@@ -1933,7 +1956,7 @@ async fn run_overwrite_flow(
             remaining.push(module);
             return (remaining, vec!["No firmware(s) found for this module.".into()]);
         }
-        redraw_chrome();
+        redraw_chrome("Select firmware to upload:");
         match run_select("Which firmware to upload?", valid, MenuMode::Sub) {
             SelectResult::Selected(fw) => *fw,
             SelectResult::Back | SelectResult::Quit => {
@@ -1976,7 +1999,7 @@ async fn run_overwrite_flow(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 3)]
 async fn main() {
-    redraw_chrome();
+    redraw_chrome("");
 
     let cli_arg1 = env::args().nth(1);
     let cli_arg2 = env::args().nth(2);
@@ -2007,6 +2030,8 @@ async fn main() {
     // Snapshot service state and stop services
     let nodered = is_service_active("nodered");
     let simulink = is_service_active("go-simulink");
+    NODERED_WAS_RUNNING.store(nodered, Ordering::Relaxed);
+    SIMULINK_WAS_RUNNING.store(simulink, Ordering::Relaxed);
     if nodered {
         stop_service("nodered");
     }
@@ -2029,7 +2054,7 @@ async fn main() {
     let modules_fut = task::spawn(get_modules_and_save(controller));
 
     // Resolve firmware directory; offer download if missing
-    let available_firmwares: Vec<FirmwareVersion> = if fs::metadata(FIRMWARE_DIR).is_err() {
+    let mut available_firmwares: Vec<FirmwareVersion> = if fs::metadata(FIRMWARE_DIR).is_err() {
         println!("No firmware found on this controller.");
         if run_confirm("Do you want to download the latest firmware?", true) {
             match check_firmware(false).await {
@@ -2048,8 +2073,7 @@ async fn main() {
         read_firmware_dir()
     };
 
-    // Progress bar style
-    let multi_progress = MultiProgress::new();
+    // Progress bar style (multi_progress is created fresh per action to avoid stale bars)
     let style = ProgressStyle::with_template("{bar:40.cyan/blue} {pos:>7}/{len:7} ({eta}) {msg}")
         .unwrap()
         .progress_chars("##-")
@@ -2085,7 +2109,7 @@ async fn main() {
         let action = match next_action.take() {
             Some(a) => a,
             None => {
-                redraw_chrome();
+                redraw_chrome("Select your action:");
                 match run_select(
                     "What do you want to do?",
                     vec![
@@ -2105,7 +2129,7 @@ async fn main() {
 
         match action {
             CommandArg::Scan => {
-                redraw_chrome();
+                redraw_chrome("Result of scanned modules:");
                 if modules.is_empty() {
                     show_view(&["No modules found".into()]);
                 } else {
@@ -2113,15 +2137,32 @@ async fn main() {
                 }
             }
             CommandArg::Check => {
-                redraw_chrome();
-                let lines = match check_firmware(false).await {
-                    Ok(l) => l,
-                    Err(e) => vec![format!("Error checking for firmware updates: {e}")],
+                let (subtitle, lines) = match check_firmware(false).await {
+                    Ok(mut l) => {
+                        let date = l.first()
+                            .and_then(|s| s.strip_prefix("Cloud manifest last updated: "))
+                            .unwrap_or("")
+                            .to_string();
+                        let subtitle = if date.is_empty() {
+                            "Latest firmware:".to_string()
+                        } else {
+                            format!("Latest firmware: ({date})")
+                        };
+                        if l.len() >= 2 { l.drain(0..2); }
+                        (subtitle, l)
+                    }
+                    Err(e) => (
+                        "Latest firmware:".to_string(),
+                        vec![format!("Error checking for firmware updates: {e}")],
+                    ),
                 };
+                redraw_chrome(&subtitle);
+                available_firmwares = read_firmware_dir();
                 show_view(&lines);
             }
             CommandArg::Update => {
                 let owned = std::mem::take(&mut modules);
+                let multi_progress = MultiProgress::new();
                 let (returned, lines) = run_update_flow(
                     owned,
                     &available_firmwares,
@@ -2138,7 +2179,7 @@ async fn main() {
                     returned
                 };
                 if !lines.is_empty() {
-                    redraw_chrome();
+                    redraw_chrome("Update result:");
                     show_view(&lines);
                 }
             }
@@ -2147,7 +2188,7 @@ async fn main() {
                 let (returned, lines) = run_overwrite_flow(
                     owned,
                     &available_firmwares,
-                    multi_progress.clone(),
+                    MultiProgress::new(),
                     style.clone(),
                     controller,
                     cli_arg2.clone(),
@@ -2160,7 +2201,7 @@ async fn main() {
                     returned
                 };
                 if !lines.is_empty() {
-                    redraw_chrome();
+                    redraw_chrome("Overwrite result:");
                     show_view(&lines);
                 }
             }

@@ -42,6 +42,17 @@ jobs:
           install -Dm755 "target/aarch64-unknown-linux-gnu/release/go-modules" \
             "${BUILD}/usr/bin/go-modules"
 
+          cat > "${BUILD}/DEBIAN/postinst" << 'POSTINST'
+          #!/bin/sh
+          set -e
+          case "$1" in
+              configure|upgrade)
+                  go-modules check || true
+                  ;;
+          esac
+          POSTINST
+          chmod 755 "${BUILD}/DEBIAN/postinst"
+
           cat > "${BUILD}/DEBIAN/control" << CONTROL
           Package: ${PACKAGE}
           Version: ${VERSION}

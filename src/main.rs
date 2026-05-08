@@ -35,6 +35,8 @@ use gpio_cdev::{AsyncLineEventHandle, Chip, EventRequestFlags, LineRequestFlags}
 
 use serde::{Deserialize, Serialize};
 
+use serde_json::{json, Value};
+
 use sha2::{Digest, Sha256};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -387,13 +389,225 @@ enum ControllerTypes {
     ModulineDisplay = 3,
 }
 
+/// modules.json schema version (configuration.md §7).
+const MODULES_JSON_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Module type identifiers from configuration.md §4. Mapped from the first
+/// 3 firmware bytes — see `ModuleType::from_firmware`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ModuleType {
+    #[serde(rename = "input-6ch")]
+    Input6Ch,
+    #[serde(rename = "input-10ch")]
+    Input10Ch,
+    #[serde(rename = "input-4-20ma")]
+    Input420Ma,
+    #[serde(rename = "bridge-2ch")]
+    Bridge2Ch,
+    #[serde(rename = "output-6ch")]
+    Output6Ch,
+    #[serde(rename = "output-10ch")]
+    Output10Ch,
+}
+
+impl ModuleType {
+    fn from_firmware(fw: &FirmwareVersion) -> Option<Self> {
+        let hw = fw.get_hardware();
+        match (hw[0], hw[1], hw[2]) {
+            (20, 10, 1) => Some(Self::Input6Ch),
+            (20, 10, 2) => Some(Self::Input10Ch),
+            (20, 10, 3) => Some(Self::Input420Ma),
+            (20, 20, 1) => Some(Self::Bridge2Ch),
+            (20, 20, 2) => Some(Self::Output6Ch),
+            (20, 20, 3) => Some(Self::Output10Ch),
+            _ => None,
+        }
+    }
+
+    fn channel_count(self) -> usize {
+        match self {
+            Self::Input6Ch | Self::Output6Ch => 6,
+            Self::Input10Ch | Self::Input420Ma | Self::Output10Ch => 10,
+            Self::Bridge2Ch => 2,
+        }
+    }
+
+    /// Conservative-default `module` object per configuration.md §5. None for
+    /// types that have no module-level configuration.
+    fn default_module(self) -> Option<Value> {
+        match self {
+            Self::Input6Ch => Some(json!({
+                "sensor_supply_1": "off",
+                "sensor_supply_2": "off",
+                "sensor_supply_3": "off",
+            })),
+            Self::Input10Ch => Some(json!({
+                "sensor_supply_1": "off",
+                "sensor_supply_2": "off",
+            })),
+            Self::Input420Ma => Some(json!({
+                "sensor_supply_1": "off",
+                "sensor_supply_2": "off",
+                "sensor_supply_3": "off",
+                "sensor_supply_4": "off",
+                "sensor_supply_5": "off",
+            })),
+            Self::Output6Ch => Some(json!({
+                "frequency_pairs": ["100Hz", "100Hz", "100Hz"],
+            })),
+            Self::Output10Ch => Some(json!({
+                "frequency_pairs": ["100Hz", "100Hz", "100Hz", "100Hz", "100Hz"],
+            })),
+            Self::Bridge2Ch => None,
+        }
+    }
+
+    /// Conservative-default `channels[i]` entry per configuration.md §5. Each
+    /// channel carries a `name` alias (empty by default) that integrators set
+    /// to a human-readable identifier ("voorpomp", "throttle"…) used by
+    /// downstream consumers.
+    fn default_channel(self, channel: u8) -> Value {
+        match self {
+            Self::Input6Ch => json!({
+                "channel": channel,
+                "func": "mv_analog",
+                "voltage_range": "5V",
+                "pull_up": "none",
+                "pull_down": "none",
+                "pulses_per_rotation": 0,
+                "analog_filter_samples": 0,
+                "name": "",
+            }),
+            Self::Input10Ch => json!({
+                "channel": channel,
+                "func": "mv_analog",
+                "pull_up": "none",
+                "pull_down": "none",
+                "name": "",
+            }),
+            Self::Input420Ma => json!({
+                "channel": channel,
+                "name": "",
+            }),
+            Self::Bridge2Ch => json!({
+                "channel": channel,
+                "func": "disabled",
+                "freq": "100Hz",
+                "name": "",
+            }),
+            Self::Output6Ch => json!({
+                "channel": channel,
+                "func": "disabled",
+                "current_max": 4000,
+                "peak_current": 1200,
+                "peak_time": 1500,
+                "fast_loop_module": 0,
+                "fast_loop_channel": 0,
+                "name": "",
+            }),
+            Self::Output10Ch => json!({
+                "channel": channel,
+                "func": "disabled",
+                "name": "",
+            }),
+        }
+    }
+
+    fn default_channels(self) -> Vec<Value> {
+        (1..=self.channel_count() as u8)
+            .map(|c| self.default_channel(c))
+            .collect()
+    }
+}
+
+/// Top-level shape of /lib/firmware/gocontroll/modules.json (configuration.md §2).
 #[derive(Serialize, Deserialize)]
-struct SlotInfo {
+struct ModulesJson {
+    schema_version: String,
+    controller: String,
+    slots: Vec<SlotEntry>,
+}
+
+/// One entry in `slots[]` (configuration.md §3). Empty slots carry only the
+/// legacy detection/identification fields (slot, firmware, manufacturer, qr_*);
+/// populated slots add the type-derived fields and the config block.
+#[derive(Serialize, Deserialize)]
+struct SlotEntry {
     slot: u8,
+    /// Full 7-byte firmware identifier (e.g. `"20-20-2-6-2-2-0"`). `""` when empty.
+    #[serde(default)]
     firmware: String,
+    /// Manufacturer code reported by the module (bytes 13..17 of bootloader info).
+    #[serde(default)]
     manufacturer: u32,
+    /// QR code front (bytes 17..21 of bootloader info).
+    #[serde(default)]
     qr_front: u32,
+    /// QR code back (bytes 21..25 of bootloader info).
+    #[serde(default)]
     qr_back: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module_type: Option<ModuleType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    article_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hardware_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    firmware_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    module: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    channels: Vec<Value>,
+}
+
+impl SlotEntry {
+    fn empty(slot: u8) -> Self {
+        Self {
+            slot,
+            firmware: String::new(),
+            manufacturer: 0,
+            qr_front: 0,
+            qr_back: 0,
+            module_type: None,
+            article_number: None,
+            hardware_version: None,
+            firmware_version: None,
+            label: None,
+            module: None,
+            channels: Vec::new(),
+        }
+    }
+}
+
+fn controller_schema_name(c: &ControllerTypes) -> &'static str {
+    match c {
+        ControllerTypes::ModulineIV => "moduline-l4",
+        ControllerTypes::ModulineMini => "moduline-m1",
+        ControllerTypes::ModulineDisplay => "moduline-hmi1",
+    }
+}
+
+/// 8-digit article number encoded from firmware bytes 0..4
+/// (e.g. bytes 20-10-1-5 → 20100105). See naming.md.
+fn article_number_from_firmware(fw: &FirmwareVersion) -> u32 {
+    let hw = fw.get_hardware();
+    hw[0] as u32 * 1_000_000 + hw[1] as u32 * 10_000 + hw[2] as u32 * 100 + hw[3] as u32
+}
+
+/// Hardware version string `"1.{vv}"` derived from byte 3 of the firmware
+/// version. Only byte 3 carries the hardware version per naming.md §3 — the
+/// preceding bytes are part of the 6-digit module-type prefix.
+fn hardware_version_string(fw: &FirmwareVersion) -> String {
+    let hw = fw.get_hardware();
+    format!("1.{:02}", hw[3])
+}
+
+/// SemVer firmware version from bytes 4,5,6.
+fn firmware_version_string(fw: &FirmwareVersion) -> String {
+    let sw = fw.get_software();
+    format!("{}.{}.{}", sw[0], sw[1], sw[2])
 }
 
 struct Module {
@@ -1550,78 +1764,246 @@ async fn get_modules_and_save(controller: ControllerTypes) -> Vec<Module> {
     save_modules(modules_out, &controller)
 }
 
-/// save all modules to /lib/firmware/gocontroll/modules.json and /usr/module-firmware/modules.txt
+/// Save all modules to /lib/firmware/gocontroll/modules.json (new schema per
+/// configuration.md) and /usr/module-firmware/modules.txt (legacy 4-line format
+/// kept alive for older Node-RED installs — see CLAUDE.md).
+///
+/// Merge semantics for modules.json: detection-derived fields
+/// (`slot`, `module_type`, `article_number`, `hardware_version`, `firmware_version`)
+/// are refreshed from the SPI scan; externally-edited `module` and `channels`
+/// are preserved across rescans. When the detected `module_type` differs from
+/// the stored one, the stale config is replaced with conservative defaults
+/// for the new type (the old shape no longer applies).
+///
+/// Caller convention: `modules` may be a full slot-indexed vec
+/// (`vec[i]` = slot `i+1`, `None` = empty slot) or a partial list of just
+/// updated slots. `None` entries trigger slot-removal only when the vec
+/// length matches the controller's slot count (i.e. the caller produced a
+/// full scan); partial-update callers pass only `Some` entries.
 fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> Vec<Module> {
     let slot_count = match controller {
         ControllerTypes::ModulineIV => 8usize,
         ControllerTypes::ModulineMini => 4usize,
         ControllerTypes::ModulineDisplay => 2usize,
     };
+    let full_scan = modules.len() == slot_count;
 
-    let mut slots: Vec<SlotInfo> = fs::read_to_string("/lib/firmware/gocontroll/modules.json")
+    let mut doc: ModulesJson = fs::read_to_string("/lib/firmware/gocontroll/modules.json")
         .ok()
-        .and_then(|s| serde_json::from_str::<Vec<SlotInfo>>(&s).ok())
-        .filter(|v| v.len() == slot_count)
-        .unwrap_or_else(|| {
-            (1..=slot_count as u8)
-                .map(|s| SlotInfo {
-                    slot: s,
-                    firmware: String::new(),
-                    manufacturer: 0,
-                    qr_front: 0,
-                    qr_back: 0,
-                })
-                .collect()
+        .and_then(|s| serde_json::from_str::<ModulesJson>(&s).ok())
+        .unwrap_or_else(|| ModulesJson {
+            schema_version: MODULES_JSON_SCHEMA_VERSION.to_string(),
+            controller: controller_schema_name(controller).to_string(),
+            slots: Vec::new(),
         });
 
-    for (i, module) in modules.iter().enumerate() {
-        if let Some(module) = module {
-            if let Some(info) = slots.iter_mut().find(|s| s.slot == module.slot) {
-                info.firmware = module.firmware.as_string();
-                info.manufacturer = module.manufacturer;
-                info.qr_front = module.qr_front;
-                info.qr_back = module.qr_back;
-            }
-        } else {
-            let slot_num = (i + 1) as u8;
-            if let Some(info) = slots.iter_mut().find(|s| s.slot == slot_num) {
-                info.firmware = String::new();
-                info.manufacturer = 0;
-                info.qr_front = 0;
-                info.qr_back = 0;
+    // Re-stamp top-level fields in case the file was hand-edited.
+    doc.schema_version = MODULES_JSON_SCHEMA_VERSION.to_string();
+    doc.controller = controller_schema_name(controller).to_string();
+
+    // Backfill `name: ""` on any channel that lacks it (added in v3.1.0 — older
+    // entries written by go-modules ≤3.0.x do not have it).
+    for slot in doc.slots.iter_mut() {
+        for ch in slot.channels.iter_mut() {
+            if let Some(obj) = ch.as_object_mut() {
+                obj.entry("name").or_insert_with(|| Value::String(String::new()));
             }
         }
     }
 
-    // Write JSON to /lib/firmware/gocontroll/modules.json
+    // input-4-20ma migration (v3.1.x): the original draft used a `supply_16ch`
+    // array of booleans and `func` on each channel. The current shape is named
+    // `sensor_supply_1..5` strings ("on"/"off") and channels expose only
+    // `channel` + `name` (per-channel func has no module-firmware meaning).
+    for slot in doc.slots.iter_mut() {
+        if matches!(slot.module_type, Some(ModuleType::Input420Ma)) {
+            if let Some(obj) = slot.module.as_mut().and_then(|v| v.as_object_mut()) {
+                if let Some(arr) = obj.remove("supply_16ch") {
+                    if let Some(bools) = arr.as_array() {
+                        for (i, v) in bools.iter().enumerate().take(5) {
+                            let on = v.as_bool().unwrap_or(false);
+                            let key = format!("sensor_supply_{}", i + 1);
+                            obj.insert(
+                                key,
+                                Value::String(if on { "on" } else { "off" }.to_string()),
+                            );
+                        }
+                    }
+                }
+                for i in 1..=5 {
+                    let key = format!("sensor_supply_{}", i);
+                    obj.entry(key)
+                        .or_insert_with(|| Value::String("off".to_string()));
+                }
+            } else {
+                slot.module = ModuleType::Input420Ma.default_module();
+            }
+            for ch in slot.channels.iter_mut() {
+                if let Some(o) = ch.as_object_mut() {
+                    o.remove("func");
+                }
+            }
+        }
+    }
+
+    for (idx, m) in modules.iter().enumerate() {
+        match m {
+            Some(module) => {
+                let detected_type = match ModuleType::from_firmware(&module.firmware) {
+                    Some(t) => t,
+                    None => {
+                        eprintln!(
+                            "Slot {}: unknown module type for firmware {}; \
+                             not writing modules.json entry",
+                            module.slot,
+                            module.firmware.as_string()
+                        );
+                        continue;
+                    }
+                };
+                let article_number = article_number_from_firmware(&module.firmware);
+                let hardware_version = hardware_version_string(&module.firmware);
+                let firmware_version = firmware_version_string(&module.firmware);
+
+                let firmware = module.firmware.as_string();
+                if let Some(existing) = doc.slots.iter_mut().find(|s| s.slot == module.slot) {
+                    let type_changed = existing.module_type != Some(detected_type);
+                    existing.module_type = Some(detected_type);
+                    existing.article_number = Some(article_number);
+                    existing.hardware_version = Some(hardware_version);
+                    existing.firmware_version = Some(firmware_version);
+                    existing.firmware = firmware;
+                    existing.manufacturer = module.manufacturer;
+                    existing.qr_front = module.qr_front;
+                    existing.qr_back = module.qr_back;
+                    if type_changed {
+                        existing.module = detected_type.default_module();
+                        existing.channels = detected_type.default_channels();
+                    }
+                } else {
+                    doc.slots.push(SlotEntry {
+                        slot: module.slot,
+                        firmware,
+                        manufacturer: module.manufacturer,
+                        qr_front: module.qr_front,
+                        qr_back: module.qr_back,
+                        module_type: Some(detected_type),
+                        article_number: Some(article_number),
+                        hardware_version: Some(hardware_version),
+                        firmware_version: Some(firmware_version),
+                        label: None,
+                        module: detected_type.default_module(),
+                        channels: detected_type.default_channels(),
+                    });
+                }
+            }
+            None if full_scan => {
+                // Slot is empty in this scan — replace any prior entry with a
+                // bare placeholder. Drops module/channels config because the
+                // module is no longer present.
+                let slot_num = (idx + 1) as u8;
+                if let Some(pos) = doc.slots.iter().position(|s| s.slot == slot_num) {
+                    doc.slots[pos] = SlotEntry::empty(slot_num);
+                } else {
+                    doc.slots.push(SlotEntry::empty(slot_num));
+                }
+            }
+            None => { /* partial update: skip None entries */ }
+        }
+    }
+
+    doc.slots.sort_by_key(|s| s.slot);
+
     if fs::create_dir_all("/lib/firmware/gocontroll/").is_err() {
         eprintln!("Could not create /lib/firmware/gocontroll/");
     }
-    match serde_json::to_string_pretty(&slots) {
+    match serde_json::to_string_pretty(&doc) {
         Ok(json) => {
             if fs::write("/lib/firmware/gocontroll/modules.json", json).is_err() {
-                eprintln!("Could not save module layout to /lib/firmware/gocontroll/modules.json");
+                eprintln!(
+                    "Could not save module layout to /lib/firmware/gocontroll/modules.json"
+                );
             }
         }
         Err(e) => eprintln!("Could not serialize module layout: {}", e),
     }
 
-    // Write legacy text format to /usr/module-firmware/modules.txt for older Node-RED
+    write_legacy_modules_txt(&modules, slot_count, full_scan);
+
+    modules.into_iter().flatten().collect()
+}
+
+/// Write /usr/module-firmware/modules.txt (legacy 4-line `:`-separated format
+/// kept for older Node-RED installs). Preserves untouched slots by reading the
+/// current file first.
+fn write_legacy_modules_txt(
+    modules: &[Option<Module>],
+    slot_count: usize,
+    full_scan: bool,
+) {
+    let mut firmware = vec![String::new(); slot_count];
+    let mut manufacturer = vec!["0".to_string(); slot_count];
+    let mut qr_front = vec!["0".to_string(); slot_count];
+    let mut qr_back = vec!["0".to_string(); slot_count];
+
+    if let Ok(content) = fs::read_to_string("/usr/module-firmware/modules.txt") {
+        let lines: Vec<&str> = content.lines().collect();
+        let take = |line: &str, default: &str| -> Vec<String> {
+            let parts: Vec<&str> = line.split(':').collect();
+            (0..slot_count)
+                .map(|i| parts.get(i).map(|s| s.to_string()).unwrap_or_else(|| default.to_string()))
+                .collect()
+        };
+        if let Some(l) = lines.first() {
+            firmware = take(l, "");
+        }
+        if let Some(l) = lines.get(1) {
+            manufacturer = take(l, "0");
+        }
+        if let Some(l) = lines.get(2) {
+            qr_front = take(l, "0");
+        }
+        if let Some(l) = lines.get(3) {
+            qr_back = take(l, "0");
+        }
+    }
+
+    for (idx, m) in modules.iter().enumerate() {
+        match m {
+            Some(module) => {
+                let i = (module.slot as usize).saturating_sub(1);
+                if i < slot_count {
+                    firmware[i] = module.firmware.as_string();
+                    manufacturer[i] = module.manufacturer.to_string();
+                    qr_front[i] = module.qr_front.to_string();
+                    qr_back[i] = module.qr_back.to_string();
+                }
+            }
+            None if full_scan => {
+                if idx < slot_count {
+                    firmware[idx] = String::new();
+                    manufacturer[idx] = "0".to_string();
+                    qr_front[idx] = "0".to_string();
+                    qr_back[idx] = "0".to_string();
+                }
+            }
+            None => {}
+        }
+    }
+
     if fs::create_dir_all("/usr/module-firmware/").is_err() {
         eprintln!("Could not create /usr/module-firmware/");
     }
     let text_content = format!(
         "{}\n{}\n{}\n{}",
-        slots.iter().map(|s| s.firmware.as_str()).collect::<Vec<_>>().join(":"),
-        slots.iter().map(|s| s.manufacturer.to_string()).collect::<Vec<_>>().join(":"),
-        slots.iter().map(|s| s.qr_front.to_string()).collect::<Vec<_>>().join(":"),
-        slots.iter().map(|s| s.qr_back.to_string()).collect::<Vec<_>>().join(":"),
+        firmware.join(":"),
+        manufacturer.join(":"),
+        qr_front.join(":"),
+        qr_back.join(":"),
     );
     if fs::write("/usr/module-firmware/modules.txt", text_content).is_err() {
         eprintln!("Could not save module layout to /usr/module-firmware/modules.txt");
     }
-
-    modules.into_iter().flatten().collect()
 }
 
 /// Update a single module. Returns the (possibly-updated) module along with

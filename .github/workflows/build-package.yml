@@ -47,6 +47,7 @@ jobs:
           set -e
           case "$1" in
               configure|upgrade)
+                  rm -f /usr/moduline/bin/go-modules
                   go-modules check || true
                   ;;
           esac

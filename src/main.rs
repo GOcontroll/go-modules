@@ -14,6 +14,7 @@ use std::{
 
 static NODERED_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 static SIMULINK_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
+static HARDWARE_DRIVER_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 
 use crossterm::{
     cursor,
@@ -114,6 +115,7 @@ fn force_quit() -> ! {
     restart_services(
         NODERED_WAS_RUNNING.load(Ordering::Relaxed),
         SIMULINK_WAS_RUNNING.load(Ordering::Relaxed),
+        HARDWARE_DRIVER_WAS_RUNNING.load(Ordering::Relaxed),
     );
     exit(-1);
 }
@@ -1423,40 +1425,78 @@ impl Module {
     }
 }
 
+/// Among `available`, return the highest-versioned firmware whose hardware
+/// matches `module.firmware` and whose software is strictly newer than the
+/// module's current software. Returns None when no update applies. Also
+/// treats current SW = `[255,255,255]` (sentinel for uninitialized) as
+/// "anything available is an update".
+fn latest_update_for(
+    module: &Module,
+    available: &[FirmwareVersion],
+) -> Option<FirmwareVersion> {
+    let current_sw = module.firmware.get_software();
+    let current_uninit = current_sw == [255u8, 255, 255];
+    available
+        .iter()
+        .copied()
+        .filter(|f| f.get_hardware() == module.firmware.get_hardware())
+        .filter(|f| f.get_software() != [255u8, 255, 255])
+        .filter(|f| current_uninit || f.get_software() > current_sw)
+        .max_by_key(|f| {
+            let sw = f.get_software();
+            (sw[0], sw[1], sw[2])
+        })
+}
+
 /// Format the scanned modules into space-aligned columns:
 /// header row above the values, no surrounding box. Returns one
-/// String per output row, intended for `show_view`.
-fn format_module_lines(modules: &[Module]) -> Vec<String> {
-    let headers = ["Slot", "Type", "HW", "SW Version"];
+/// String per output row, intended for `show_view`. The "Update" column
+/// shows the highest locally-cached firmware that is newer than the
+/// module's current software (empty when up to date or no firmware
+/// cached — run `go-modules check` to refresh the local cache).
+fn format_module_lines(modules: &[Module], available: &[FirmwareVersion]) -> Vec<String> {
+    let headers = ["Slot", "Type", "HW", "SW Version", "Update"];
 
-    let rows: Vec<[String; 4]> = modules
+    let rows: Vec<[String; 5]> = modules
         .iter()
         .map(|m| {
             let hw = m.firmware.get_hardware();
             let sw = m.firmware.get_software();
+            let update_cell = match latest_update_for(m, available) {
+                Some(fw) => {
+                    let nsw = fw.get_software();
+                    format!("→ {}.{}.{}", nsw[0], nsw[1], nsw[2])
+                }
+                None => String::new(),
+            };
             [
                 m.slot.to_string(),
                 m.type_name().to_string(),
                 hw[3].to_string(),
                 format!("{}.{}.{}", sw[0], sw[1], sw[2]),
+                update_cell,
             ]
         })
         .collect();
 
-    let mut widths: [usize; 4] = [0; 4];
+    let mut widths: [usize; 5] = [0; 5];
     for (i, h) in headers.iter().enumerate() {
         widths[i] = h.len();
     }
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
+            widths[i] = widths[i].max(cell.chars().count());
         }
     }
 
     let render = |cells: &[&str]| -> String {
         let mut s = String::new();
         for (i, &cell) in cells.iter().enumerate() {
-            let _ = write!(s, "{:<width$}", cell, width = widths[i]);
+            let pad = widths[i].saturating_sub(cell.chars().count());
+            s.push_str(cell);
+            for _ in 0..pad {
+                s.push(' ');
+            }
             if i + 1 < cells.len() {
                 s.push_str("  ");
             }
@@ -1467,15 +1507,17 @@ fn format_module_lines(modules: &[Module]) -> Vec<String> {
     let mut out = Vec::with_capacity(rows.len() + 1);
     out.push(render(&headers));
     for row in &rows {
-        let cells: [&str; 4] = [&row[0], &row[1], &row[2], &row[3]];
+        let cells: [&str; 5] = [&row[0], &row[1], &row[2], &row[3], &row[4]];
         out.push(render(&cells));
     }
     out
 }
 
-/// Restart nodered and go-simulink if they were running before the app started.
-/// Idempotent — safe to call from the ctrlc handler and from the normal exit path.
-fn restart_services(nodered: bool, simulink: bool) {
+/// Restart nodered, go-simulink, and go-hardware-driver if they were running
+/// before the app started. Idempotent — safe to call from the ctrlc handler
+/// and from the normal exit path. `go-hardware-driver` is absent on legacy
+/// controllers; in that case the snapshot bool is simply false and we skip it.
+fn restart_services(nodered: bool, simulink: bool, hardware_driver: bool) {
     if nodered {
         _ = Command::new("systemctl")
             .arg("start")
@@ -1487,6 +1529,13 @@ fn restart_services(nodered: bool, simulink: bool) {
         _ = Command::new("systemctl")
             .arg("start")
             .arg("go-simulink")
+            .status();
+    }
+
+    if hardware_driver {
+        _ = Command::new("systemctl")
+            .arg("start")
+            .arg("go-hardware-driver")
             .status();
     }
 }
@@ -2409,26 +2458,34 @@ async fn main() {
     // Detect controller
     let controller = detect_controller();
 
-    // Snapshot service state and stop services
+    // Snapshot service state and stop services. `go-hardware-driver` is the
+    // generic SPI/GPIO driver that talks to the same modules; on legacy
+    // controllers without it `is_service_active` returns false and the rest
+    // of the flow is a no-op.
     let nodered = is_service_active("nodered");
     let simulink = is_service_active("go-simulink");
+    let hardware_driver = is_service_active("go-hardware-driver");
     NODERED_WAS_RUNNING.store(nodered, Ordering::Relaxed);
     SIMULINK_WAS_RUNNING.store(simulink, Ordering::Relaxed);
+    HARDWARE_DRIVER_WAS_RUNNING.store(hardware_driver, Ordering::Relaxed);
     if nodered {
         stop_service("nodered");
     }
     if simulink {
         stop_service("go-simulink");
     }
+    if hardware_driver {
+        stop_service("go-hardware-driver");
+    }
 
     // SIGINT handler (fires only outside crossterm raw mode — i.e. during
     // async firmware upload / network fetches). Restart services and exit.
     if let Err(err) = ctrlc::set_handler(move || {
-        restart_services(nodered, simulink);
+        restart_services(nodered, simulink, hardware_driver);
         exit(-1);
     }) {
         eprintln!("couldn't set sigint handler: {}", err);
-        restart_services(nodered, simulink);
+        restart_services(nodered, simulink, hardware_driver);
         exit(-1);
     }
 
@@ -2468,7 +2525,7 @@ async fn main() {
         Ok(m) => m,
         Err(_) => {
             eprintln!("Could not get module information");
-            restart_services(nodered, simulink);
+            restart_services(nodered, simulink, hardware_driver);
             exit(-1);
         }
     };
@@ -2482,7 +2539,7 @@ async fn main() {
         None => None,
         Some(other) => {
             eprintln!("Invalid command entered {}\n{}", other, USAGE);
-            restart_services(nodered, simulink);
+            restart_services(nodered, simulink, hardware_driver);
             exit(-1);
         }
     };
@@ -2515,7 +2572,7 @@ async fn main() {
                 if modules.is_empty() {
                     show_view(&["No modules found".into()]);
                 } else {
-                    show_view(&format_module_lines(&modules));
+                    show_view(&format_module_lines(&modules, &available_firmwares));
                 }
             }
             CommandArg::Check => {
@@ -2590,6 +2647,6 @@ async fn main() {
         }
     }
 
-    restart_services(nodered, simulink);
+    restart_services(nodered, simulink, hardware_driver);
     exit(0);
 }

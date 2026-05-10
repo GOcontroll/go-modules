@@ -16,6 +16,18 @@ static NODERED_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 static SIMULINK_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 static HARDWARE_DRIVER_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// Set by any hardware-error path during a scan (SPI device open / GPIO
+/// chip+line open / SPI transfer). Checked by `get_modules_and_save` to
+/// decide whether to persist scan results — a partially-failed scan must
+/// not overwrite `modules.json`, because the all-`None` slots would be
+/// indistinguishable from "modules physically removed" and would wipe
+/// existing config.
+static SCAN_HAD_ERRORS: AtomicBool = AtomicBool::new(false);
+
+fn flag_scan_error() {
+    SCAN_HAD_ERRORS.store(true, Ordering::Relaxed);
+}
+
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -666,7 +678,7 @@ impl Module {
                 1 => (
                     Spidev::new(
                         File::open("/dev/spidev1.0")
-                            .map_err(|_| eprintln!("Could not get slot 1 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 1 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip0", 6, slot)?,
@@ -674,7 +686,7 @@ impl Module {
                 2 => (
                     Spidev::new(
                         File::open("/dev/spidev1.1")
-                            .map_err(|_| eprintln!("Could not get slot 2 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 2 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip4", 20, slot)?,
@@ -682,7 +694,7 @@ impl Module {
                 3 => (
                     Spidev::new(
                         File::open("/dev/spidev2.0")
-                            .map_err(|_| eprintln!("Could not get slot 3 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 3 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip0", 7, slot)?,
@@ -690,7 +702,7 @@ impl Module {
                 4 => (
                     Spidev::new(
                         File::open("/dev/spidev2.1")
-                            .map_err(|_| eprintln!("Could not get slot 4 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 4 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip4", 21, slot)?,
@@ -698,7 +710,7 @@ impl Module {
                 5 => (
                     Spidev::new(
                         File::open("/dev/spidev2.2")
-                            .map_err(|_| eprintln!("Could not get slot 5 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 5 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip4", 1, slot)?,
@@ -706,7 +718,7 @@ impl Module {
                 6 => (
                     Spidev::new(
                         File::open("/dev/spidev2.3")
-                            .map_err(|_| eprintln!("Could not get slot 6 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 6 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip3", 26, slot)?,
@@ -714,7 +726,7 @@ impl Module {
                 7 => (
                     Spidev::new(
                         File::open("/dev/spidev0.0")
-                            .map_err(|_| eprintln!("Could not get slot 7 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 7 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip2", 19, slot)?,
@@ -722,7 +734,7 @@ impl Module {
                 8 => (
                     Spidev::new(
                         File::open("/dev/spidev0.1")
-                            .map_err(|_| eprintln!("Could not get slot 8 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 8 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip2", 22, slot)?,
@@ -739,7 +751,7 @@ impl Module {
                 1 => (
                     Spidev::new(
                         File::open("/dev/spidev1.0")
-                            .map_err(|_| eprintln!("Could not get slot 1 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 1 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip0", 10, slot)?,
@@ -747,7 +759,7 @@ impl Module {
                 2 => (
                     Spidev::new(
                         File::open("/dev/spidev1.1")
-                            .map_err(|_| eprintln!("Could not get slot 2 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 2 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip0", 5, slot)?,
@@ -755,7 +767,7 @@ impl Module {
                 3 => (
                     Spidev::new(
                         File::open("/dev/spidev2.0")
-                            .map_err(|_| eprintln!("Could not get slot 3 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 3 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip3", 26, slot)?,
@@ -763,7 +775,7 @@ impl Module {
                 4 => (
                     Spidev::new(
                         File::open("/dev/spidev2.1")
-                            .map_err(|_| eprintln!("Could not get slot 4 spidev"))
+                            .map_err(|_| { eprintln!("Could not get slot 4 spidev"); flag_scan_error(); })
                             .ok()?,
                     ),
                     get_interrupt("/dev/gpiochip2", 19, slot)?,
@@ -781,7 +793,7 @@ impl Module {
                     1 => (
                         Spidev::new(
                             File::open("/dev/spidev1.0")
-                                .map_err(|_| eprintln!("Could not get slot 1 spidev"))
+                                .map_err(|_| { eprintln!("Could not get slot 1 spidev"); flag_scan_error(); })
                                 .ok()?,
                         ),
                         get_interrupt("/dev/gpiochip3", 5, slot)?,
@@ -789,7 +801,7 @@ impl Module {
                     2 => (
                         Spidev::new(
                             File::open("/dev/spidev1.1")
-                                .map_err(|_| eprintln!("Could not get slot 2 spidev"))
+                                .map_err(|_| { eprintln!("Could not get slot 2 spidev"); flag_scan_error(); })
                                 .ok()?,
                         ),
                         get_interrupt("/dev/gpiochip0", 0, slot)?,
@@ -833,7 +845,7 @@ impl Module {
             .transfer(&mut SpidevTransfer::write(&DUMMY_MESSAGE))
         {
             Ok(()) => (),
-            Err(_) => return None,
+            Err(_) => { flag_scan_error(); return None; }
         }
 
         self.reset_module(true);
@@ -855,7 +867,7 @@ impl Module {
             .transfer(&mut SpidevTransfer::read_write(&tx_buf, &mut rx_buf))
         {
             Ok(()) => (),
-            Err(_) => return None,
+            Err(_) => { flag_scan_error(); return None; }
         }
 
         if rx_buf[BOOTMESSAGE_LENGTH - 1] != calculate_checksum(&rx_buf, BOOTMESSAGE_LENGTH - 1)
@@ -1582,18 +1594,18 @@ fn verify_sha256(data: &[u8], expected_hex: &str) -> bool {
 /// get module interrupt pin
 fn get_interrupt(chip: &str, line: u32, slot: u8) -> Option<AsyncLineEventHandle> {
     let mut chip = Chip::new(chip)
-        .map_err(|_| eprintln!("Could not get slot {slot} interrupt chip"))
+        .map_err(|_| { eprintln!("Could not get slot {slot} interrupt chip"); flag_scan_error(); })
         .ok()?;
     let line = chip
         .get_line(line)
-        .map_err(|_| eprintln!("Could not get slot {slot} interrupt line"))
+        .map_err(|_| { eprintln!("Could not get slot {slot} interrupt line"); flag_scan_error(); })
         .ok()?;
     line.async_events(
         LineRequestFlags::INPUT,
         EventRequestFlags::FALLING_EDGE,
         format!("module {slot} interrupt").as_str(),
     )
-    .map_err(|err| eprintln!("Could not get slot {slot} interrupt line handle: {err}"))
+    .map_err(|err| { eprintln!("Could not get slot {slot} interrupt line handle: {err}"); flag_scan_error(); })
     .ok()
 }
 
@@ -1805,8 +1817,23 @@ async fn get_modules(controller: &ControllerTypes) -> Vec<Module> {
 }
 
 /// get the modules in the controller and save them
+///
+/// `modules.json` is only rewritten when the scan ran cleanly. If any
+/// hardware error occurred (SPI device open, GPIO line open, SPI transfer),
+/// `SCAN_HAD_ERRORS` is set by the failing path and we return without
+/// touching the file — otherwise the all-`None` slots from a failed scan
+/// would be written as `SlotEntry::empty()` and silently wipe user-edited
+/// channel/module config.
 async fn get_modules_and_save(controller: ControllerTypes) -> Vec<Module> {
+    SCAN_HAD_ERRORS.store(false, Ordering::Relaxed);
     let modules = get_modules(&controller).await;
+    if SCAN_HAD_ERRORS.load(Ordering::Relaxed) {
+        eprintln!(
+            "Scan encountered hardware errors; modules.json was not updated. \
+             Resolve the SPI/GPIO conflict and rerun the scan."
+        );
+        return modules;
+    }
     let mut modules_out: Vec<Option<Module>> = match &controller {
         ControllerTypes::ModulineDisplay => vec![None, None],
         ControllerTypes::ModulineIV => vec![None, None, None, None, None, None, None, None],

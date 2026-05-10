@@ -1,3 +1,12 @@
+v3.1.3
+ - Fixed: a scan that hits hardware errors (SPI device open, GPIO line open,
+   SPI transfer) no longer overwrites `modules.json`. Previously a failed
+   scan returned all `None` slots, which `save_modules` interpreted as
+   "modules physically removed" and reset every slot to `SlotEntry::empty()`,
+   wiping all user-edited channel/module config. Now error sites set a
+   `SCAN_HAD_ERRORS` flag and `get_modules_and_save` skips the write,
+   printing a stderr hint instead.
+
 v3.1.2
  - Fixed: `modules.json` user-edited config no longer overwritten by defaults
    on rescan. Per-channel `name`, `func`, `pull_up`, `pull_down`, `voltage_range`,

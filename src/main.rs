@@ -523,10 +523,16 @@ impl ModuleType {
 }
 
 /// Top-level shape of /lib/firmware/gocontroll/modules.json (configuration.md §2).
+/// All fields are `serde(default)` so a partially-corrupted or older file does
+/// not nuke the entire deserialization — `save_modules` re-stamps the top-level
+/// fields anyway, and per-slot fields each carry their own defaults.
 #[derive(Serialize, Deserialize)]
 struct ModulesJson {
+    #[serde(default)]
     schema_version: String,
+    #[serde(default)]
     controller: String,
+    #[serde(default)]
     slots: Vec<SlotEntry>,
 }
 
@@ -1813,16 +1819,56 @@ async fn get_modules_and_save(controller: ControllerTypes) -> Vec<Module> {
     save_modules(modules_out, &controller)
 }
 
+/// Insert any keys from `defaults` that are not already present in `existing`.
+/// Existing values are never overwritten. Both must be JSON objects; any other
+/// shape is left untouched. Used by `save_modules` to honor user-edited config
+/// (`name`, `func`, `pull_up`, `current_max`, etc.) while still backfilling
+/// keys that newer schema versions added.
+fn merge_defaults_into(existing: &mut Value, defaults: &Value) {
+    if let (Some(e), Some(d)) = (existing.as_object_mut(), defaults.as_object()) {
+        for (k, v) in d {
+            e.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+}
+
+/// Merge per-channel defaults for `ty` into `existing`. Channels are matched on
+/// the `channel` field; an entry that exists gets missing keys filled in (other
+/// keys preserved), an entry that's missing gets the full default appended.
+/// Channels outside `1..=channel_count` are left in place untouched.
+fn merge_channels(existing: &mut Vec<Value>, ty: ModuleType) {
+    let count = ty.channel_count() as u8;
+    for ch in 1..=count {
+        let pos = existing
+            .iter()
+            .position(|v| v.get("channel").and_then(|c| c.as_u64()) == Some(ch as u64));
+        let default = ty.default_channel(ch);
+        match pos {
+            Some(i) => merge_defaults_into(&mut existing[i], &default),
+            None => existing.push(default),
+        }
+    }
+}
+
 /// Save all modules to /lib/firmware/gocontroll/modules.json (new schema per
 /// configuration.md) and /usr/module-firmware/modules.txt (legacy 4-line format
 /// kept alive for older Node-RED installs — see CLAUDE.md).
 ///
 /// Merge semantics for modules.json: detection-derived fields
 /// (`slot`, `module_type`, `article_number`, `hardware_version`, `firmware_version`)
-/// are refreshed from the SPI scan; externally-edited `module` and `channels`
-/// are preserved across rescans. When the detected `module_type` differs from
-/// the stored one, the stale config is replaced with conservative defaults
-/// for the new type (the old shape no longer applies).
+/// are refreshed from the SPI scan; user-edited `module` and `channels` are
+/// preserved across rescans via `merge_defaults_into` / `merge_channels` —
+/// missing keys get conservative defaults, present keys keep their value.
+/// Only when the detected `module_type` differs from a previously-recorded
+/// `Some(other)` is the slot wiped and refilled with defaults for the new
+/// type (the old keys no longer apply). A previously-absent `module_type`
+/// (None) is treated as "unknown but assume compatible" to avoid clobbering
+/// config from older schema versions.
+///
+/// Parse failures: the old `.ok()` chain silently dropped the entire doc on
+/// any deserialization error, which would wipe user config. The current code
+/// instead backs the file up to `modules.json.bak.<unix-ts>` and logs to
+/// stderr before falling back to an empty doc.
 ///
 /// Caller convention: `modules` may be a full slot-indexed vec
 /// (`vec[i]` = slot `i+1`, `None` = empty slot) or a partial list of just
@@ -1837,14 +1883,31 @@ fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> V
     };
     let full_scan = modules.len() == slot_count;
 
-    let mut doc: ModulesJson = fs::read_to_string("/lib/firmware/gocontroll/modules.json")
-        .ok()
-        .and_then(|s| serde_json::from_str::<ModulesJson>(&s).ok())
-        .unwrap_or_else(|| ModulesJson {
-            schema_version: MODULES_JSON_SCHEMA_VERSION.to_string(),
-            controller: controller_schema_name(controller).to_string(),
-            slots: Vec::new(),
-        });
+    let empty_doc = || ModulesJson {
+        schema_version: MODULES_JSON_SCHEMA_VERSION.to_string(),
+        controller: controller_schema_name(controller).to_string(),
+        slots: Vec::new(),
+    };
+    let path = "/lib/firmware/gocontroll/modules.json";
+    let mut doc: ModulesJson = match fs::read_to_string(path) {
+        Ok(s) => match serde_json::from_str::<ModulesJson>(&s) {
+            Ok(d) => d,
+            Err(e) => {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let bak = format!("{}.bak.{}", path, ts);
+                eprintln!(
+                    "modules.json failed to parse ({e}); backing up to {bak} \
+                     and starting from an empty doc"
+                );
+                let _ = fs::copy(path, &bak);
+                empty_doc()
+            }
+        },
+        Err(_) => empty_doc(),
+    };
 
     // Re-stamp top-level fields in case the file was hand-edited.
     doc.schema_version = MODULES_JSON_SCHEMA_VERSION.to_string();
@@ -1916,7 +1979,11 @@ fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> V
 
                 let firmware = module.firmware.as_string();
                 if let Some(existing) = doc.slots.iter_mut().find(|s| s.slot == module.slot) {
-                    let type_changed = existing.module_type != Some(detected_type);
+                    // Only treat as a real type-swap when the previous type was
+                    // recorded AND differs. A previously-absent module_type
+                    // (older schema, hand-edited file) is treated as compatible
+                    // so user-edited config is not clobbered.
+                    let type_changed = matches!(existing.module_type, Some(prev) if prev != detected_type);
                     existing.module_type = Some(detected_type);
                     existing.article_number = Some(article_number);
                     existing.hardware_version = Some(hardware_version);
@@ -1928,6 +1995,16 @@ fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> V
                     if type_changed {
                         existing.module = detected_type.default_module();
                         existing.channels = detected_type.default_channels();
+                    } else {
+                        // Same type (or previously unknown): preserve user-set
+                        // values, only fill in keys the existing entry lacks.
+                        if let Some(default_mod) = detected_type.default_module() {
+                            match existing.module.as_mut() {
+                                Some(m) => merge_defaults_into(m, &default_mod),
+                                None => existing.module = Some(default_mod),
+                            }
+                        }
+                        merge_channels(&mut existing.channels, detected_type);
                     }
                 } else {
                     doc.slots.push(SlotEntry {

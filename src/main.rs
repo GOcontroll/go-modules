@@ -16,6 +16,11 @@ static NODERED_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 static SIMULINK_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 static HARDWARE_DRIVER_WAS_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// True when the process was invoked with a CLI command (scan/update/overwrite)
+/// instead of dropping into the TUI. Read by `show_view` to skip the
+/// wait-for-key step so scripted callers don't have to send an Esc to exit.
+static STARTED_FROM_CLI: AtomicBool = AtomicBool::new(false);
+
 /// Set by any hardware-error path during a scan (SPI device open / GPIO
 /// chip+line open / SPI transfer). Checked by `get_modules_and_save` to
 /// decide whether to persist scan results — a partially-failed scan must
@@ -218,6 +223,14 @@ fn show_view(lines: &[String]) {
         println!("  {}", line);
     }
     println!("{}", SEP);
+
+    if !io::stdin().is_terminal() || STARTED_FROM_CLI.load(Ordering::Relaxed) {
+        // Non-TTY or CLI-invoked single-shot: skip the "Esc back" hint and
+        // return immediately instead of waiting for a keypress.
+        let _ = stdout.flush();
+        return;
+    }
+
     queue!(
         stdout,
         SetForegroundColor(Color::DarkGrey),
@@ -226,11 +239,6 @@ fn show_view(lines: &[String]) {
     )
     .unwrap();
     let _ = stdout.flush();
-
-    if !io::stdin().is_terminal() {
-        // Non-TTY: just print and return immediately.
-        return;
-    }
 
     terminal::enable_raw_mode().unwrap();
     loop {
@@ -2648,6 +2656,14 @@ async fn main() {
         }
     };
 
+    // When invoked with a CLI command, run that single action and exit instead
+    // of falling back into the interactive TUI menu. Required so scripts and
+    // services (e.g. go-provision-server) can call `go-modules scan` and have
+    // the process terminate cleanly. The atomic is also read by `show_view`
+    // so it skips the wait-for-key step in TTY-mode CLI calls.
+    let started_from_cli = next_action.is_some();
+    STARTED_FROM_CLI.store(started_from_cli, Ordering::Relaxed);
+
     loop {
         let action = match next_action.take() {
             Some(a) => a,
@@ -2748,6 +2764,10 @@ async fn main() {
                     show_view(&lines);
                 }
             }
+        }
+
+        if started_from_cli {
+            break;
         }
     }
 

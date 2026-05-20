@@ -1,3 +1,17 @@
+v3.2.0
+ - Added per-slot `enabled` boolean to `modules.json`. When false, the
+   companion `go-hardware-driver` (>=0.2.0) leaves the slot completely
+   untouched — no reset, no bootloader skip, no init, no cyclic tick.
+   Intended for cases where an external application drives a module on its
+   own. Existing `modules.json` files written by go-modules <3.2.0 are
+   migrated transparently: the key defaults to `true` and is backfilled on
+   the next save.
+ - Added detection for the IR Communication Module (article `203003`,
+   firmware-bytes `(20, 30, 3)`) → JSON `module_type: "ir-communication"`.
+   Conservative defaults written per GOcontroll-Architecture
+   modules/ir-communication.md §3–4 (SAE J2799 default protocol, H35
+   receptacle, 400 L tank, CAN off, two channels disabled).
+
 v3.1.4
  - Fixed: `go-modules <command>` (scan/update/overwrite) now exits after the
    action instead of falling back into the interactive TUI menu. Required so

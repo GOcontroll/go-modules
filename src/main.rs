@@ -430,6 +430,8 @@ enum ModuleType {
     Output6Ch,
     #[serde(rename = "output-10ch")]
     Output10Ch,
+    #[serde(rename = "ir-communication")]
+    IrCommunication,
 }
 
 impl ModuleType {
@@ -442,6 +444,7 @@ impl ModuleType {
             (20, 20, 1) => Some(Self::Bridge2Ch),
             (20, 20, 2) => Some(Self::Output6Ch),
             (20, 20, 3) => Some(Self::Output10Ch),
+            (20, 30, 3) => Some(Self::IrCommunication),
             _ => None,
         }
     }
@@ -450,7 +453,7 @@ impl ModuleType {
         match self {
             Self::Input6Ch | Self::Output6Ch => 6,
             Self::Input10Ch | Self::Input420Ma | Self::Output10Ch => 10,
-            Self::Bridge2Ch => 2,
+            Self::Bridge2Ch | Self::IrCommunication => 2,
         }
     }
 
@@ -481,6 +484,16 @@ impl ModuleType {
                 "frequency_pairs": ["100Hz", "100Hz", "100Hz", "100Hz", "100Hz"],
             })),
             Self::Bridge2Ch => None,
+            Self::IrCommunication => Some(json!({
+                "ir_output_type":   "direct",
+                "protocol_id":      "sae_j2799",
+                "software_version": "1.01",
+                "tank_volume":      400,
+                "receptable_type":  "h35",
+                "can_active":       false,
+                "can_bitrate":      "250k",
+                "frequency_pairs":  ["100Hz"],
+            })),
         }
     }
 
@@ -532,6 +545,13 @@ impl ModuleType {
                 "func": "disabled",
                 "name": "",
             }),
+            Self::IrCommunication => json!({
+                "channel": channel,
+                "func": "disabled",
+                "peak_duty": 1000,
+                "peak_time": 500,
+                "name": "",
+            }),
         }
     }
 
@@ -574,6 +594,12 @@ struct SlotEntry {
     /// QR code back (bytes 21..25 of bootloader info).
     #[serde(default)]
     qr_back: u32,
+    /// Hardware-driver opt-out. When false `go-hardware-driver` leaves this
+    /// slot completely untouched (no reset, no bootloader skip, no init, no
+    /// cyclic tick). Defaults to true on missing-key so existing modules.json
+    /// files written by go-modules <3.2.0 are migrated transparently.
+    #[serde(default = "default_enabled")]
+    enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     module_type: Option<ModuleType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -590,6 +616,8 @@ struct SlotEntry {
     channels: Vec<Value>,
 }
 
+fn default_enabled() -> bool { true }
+
 impl SlotEntry {
     fn empty(slot: u8) -> Self {
         Self {
@@ -598,6 +626,7 @@ impl SlotEntry {
             manufacturer: 0,
             qr_front: 0,
             qr_back: 0,
+            enabled: true,
             module_type: None,
             article_number: None,
             hardware_version: None,
@@ -1399,7 +1428,7 @@ impl Display for Module {
                 },
                 30 => match hardware[2] {
                     3 => format!(
-                        "slot {}: ANLEG IR module version {} sw: {}.{}.{}",
+                        "slot {}: IR communication module version {} sw: {}.{}.{}",
                         self.slot, hardware[3], software[0], software[1], software[2]
                     ),
                     4 => format!(
@@ -1438,7 +1467,7 @@ impl Module {
                 _ => "Unknown",
             },
             30 => match hw[2] {
-                3 => "ANLEG IR",
+                3 => "IR communication",
                 4 => "Multibus",
                 _ => "Unknown",
             },
@@ -2048,6 +2077,7 @@ fn save_modules(modules: Vec<Option<Module>>, controller: &ControllerTypes) -> V
                         manufacturer: module.manufacturer,
                         qr_front: module.qr_front,
                         qr_back: module.qr_back,
+                        enabled: true,
                         module_type: Some(detected_type),
                         article_number: Some(article_number),
                         hardware_version: Some(hardware_version),

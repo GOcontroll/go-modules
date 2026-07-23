@@ -481,7 +481,7 @@ impl ModuleType {
                 "frequency_pairs": ["100Hz", "100Hz", "100Hz"],
             })),
             Self::Output10Ch => Some(json!({
-                "frequency_pairs": ["100Hz", "100Hz", "100Hz", "100Hz", "100Hz"],
+                "frequency_pairs": ["200Hz", "200Hz", "200Hz", "200Hz", "200Hz"],
             })),
             Self::Bridge2Ch => None,
             Self::IrCommunication => Some(json!({

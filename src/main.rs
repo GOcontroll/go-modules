@@ -432,6 +432,8 @@ enum ModuleType {
     Output10Ch,
     #[serde(rename = "ir-communication")]
     IrCommunication,
+    #[serde(rename = "multibus")]
+    Multibus,
 }
 
 impl ModuleType {
@@ -445,6 +447,7 @@ impl ModuleType {
             (20, 20, 2) => Some(Self::Output6Ch),
             (20, 20, 3) => Some(Self::Output10Ch),
             (20, 30, 3) => Some(Self::IrCommunication),
+            (20, 30, 4) => Some(Self::Multibus),
             _ => None,
         }
     }
@@ -454,6 +457,10 @@ impl ModuleType {
             Self::Input6Ch | Self::Output6Ch => 6,
             Self::Input10Ch | Self::Input420Ma | Self::Output10Ch => 10,
             Self::Bridge2Ch | Self::IrCommunication => 2,
+            // The Multibus exposes its CAN, UART and isoSPI interfaces over USB
+            // rather than as addressable module-bus channels, so there is
+            // nothing to enumerate here.
+            Self::Multibus => 0,
         }
     }
 
@@ -484,6 +491,11 @@ impl ModuleType {
                 "frequency_pairs": ["200Hz", "200Hz", "200Hz", "200Hz", "200Hz"],
             })),
             Self::Bridge2Ch => None,
+            // No module-level configuration yet. The Multibus is configured
+            // over its own USB interfaces (gs_usb for CAN, CDC-ACM for the
+            // UARTs and isoSPI), not through modules.json. Add keys here once
+            // that surface is settled.
+            Self::Multibus => None,
             Self::IrCommunication => Some(json!({
                 "ir_output_type":   "direct",
                 "protocol_id":      "sae_j2799",
@@ -550,6 +562,12 @@ impl ModuleType {
                 "func": "disabled",
                 "peak_duty": 1000,
                 "peak_time": 500,
+                "name": "",
+            }),
+            // Unreachable: channel_count() is 0 for the Multibus, so
+            // default_channels() never iterates. Kept for exhaustiveness.
+            Self::Multibus => json!({
+                "channel": channel,
                 "name": "",
             }),
         }

@@ -100,7 +100,7 @@ Firmware filenames encode the version: `20-10-1-5-0-0-9.srec` = 4 hardware bytes
 
 ### Cloud firmware (`check` command)
 
-Fetches `https://firmware.gocontroll.com/modules/manifest.json` → per-module sub-manifests → downloads `.srec` files into `/lib/firmware/gocontroll/`, validating SHA256 against the manifest. `check` runs **before** `detect_controller()` and service shutdown in `main()`, so it works on any host with network access — preserve that ordering.
+Fetches `modules/manifest.json` from the first host in `CLOUD_BASE_URLS` that answers with a valid manifest (`https://firmware.gocontroll.tech`, fallback `https://firmware.gocontroll.com`; both serve the same R2 bucket, see `GOcontroll-Architecture/cloudflare/firmware/spec.md` "Hosts") → per-module sub-manifests → downloads `.srec` files into `/lib/firmware/gocontroll/`, validating SHA256 against the manifest. Sub-manifests and files come from the same host as the main manifest; keep manifest paths host-relative. `check` runs **before** `detect_controller()` and service shutdown in `main()`, so it works on any host with network access — preserve that ordering.
 
 ### Service management
 

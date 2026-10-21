@@ -291,7 +291,10 @@ const BOOTMESSAGE_LENGTH_CHECK: usize = 61;
 const SLOT_PROMPT: &str = "Which slot to overwrite?";
 
 const FIRMWARE_DIR: &str = "/lib/firmware/gocontroll/";
-const CLOUD_BASE_URL: &str = "https://firmware.gocontroll.com";
+/// Firmware hosts in order of preference. Both serve the same R2 bucket
+/// (gocontroll-firmware), byte for byte; firmware.gocontroll.com is the
+/// fallback while device traffic moves to gocontroll.tech side by side.
+const CLOUD_BASE_URLS: [&str; 2] = ["https://firmware.gocontroll.tech", "https://firmware.gocontroll.com"];
 
 const USAGE: &str = "Usage:
 go-modules <command> [subcommands]
@@ -695,7 +698,7 @@ struct Module {
     qr_back: u32,
 }
 
-/// Cloud manifest structs for firmware.gocontroll.com
+/// Cloud manifest structs for firmware.gocontroll.tech / .com
 #[derive(Deserialize)]
 struct CloudMainManifest {
     updated: String,
@@ -1682,17 +1685,36 @@ struct CheckEntry {
 /// All output is returned rather than printed so the caller can render it
 /// inside the frame view.
 async fn check_firmware(verbose: bool) -> Result<Vec<String>, String> {
-    let client = reqwest::Client::new();
-
-    // Fetch main manifest
-    let main_manifest: CloudMainManifest = client
-        .get(format!("{}/modules/manifest.json", CLOUD_BASE_URL))
-        .send()
-        .await
-        .map_err(|e| format!("{e}"))?
-        .json()
-        .await
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
         .map_err(|e| format!("{e}"))?;
+
+    // Fetch the main manifest from the first host that answers with a valid
+    // one; sub-manifests and files then come from that same host.
+    let mut last_err = String::new();
+    let mut found: Option<(&str, CloudMainManifest)> = None;
+    for base in CLOUD_BASE_URLS {
+        let result: Result<CloudMainManifest, reqwest::Error> = async {
+            client
+                .get(format!("{base}/modules/manifest.json"))
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<CloudMainManifest>()
+                .await
+        }
+        .await;
+        match result {
+            Ok(m) => {
+                found = Some((base, m));
+                break;
+            }
+            Err(e) => last_err = format!("{base}: {e}"),
+        }
+    }
+    let (cloud_base_url, main_manifest) = found.ok_or(last_err)?;
 
     // Ensure firmware directory exists
     fs::create_dir_all(FIRMWARE_DIR)
@@ -1703,7 +1725,7 @@ async fn check_firmware(verbose: bool) -> Result<Vec<String>, String> {
     for entry in &main_manifest.modules {
         // Fetch per-module sub-manifest
         let sub_manifest: CloudModuleManifest = match client
-            .get(format!("{}/{}", CLOUD_BASE_URL, entry.manifest))
+            .get(format!("{}/{}", cloud_base_url, entry.manifest))
             .send()
             .await
         {
@@ -1781,7 +1803,7 @@ async fn check_firmware(verbose: bool) -> Result<Vec<String>, String> {
 
         if needs_download {
             match client
-                .get(format!("{}/{}", CLOUD_BASE_URL, latest.file))
+                .get(format!("{}/{}", cloud_base_url, latest.file))
                 .send()
                 .await
             {

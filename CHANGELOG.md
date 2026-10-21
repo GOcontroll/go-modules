@@ -1,3 +1,18 @@
+v3.3.1
+ - `go-modules check` (also run by the package's postinst) fetches the cloud
+   firmware from firmware.gocontroll.tech first and falls back to
+   firmware.gocontroll.com when .tech does not answer with a valid
+   `modules/manifest.json` (DNS/connection error, HTTP status other than 2xx,
+   unparsable JSON). Both hosts serve the same R2 bucket; sub-manifests and
+   `.srec` files come from the host that served the main manifest. Was
+   firmware.gocontroll.com only.
+ - The cloud client now has a 10 s connect timeout and a 60 s request
+   timeout, so an unreachable host no longer stalls `check`.
+
+v3.3.0
+ - Multibus module (hardware 20-30-4) detection and configuration. This entry
+   was added afterwards; see commit 7330cd5 for the details.
+
 v3.2.0
  - Added per-slot `enabled` boolean to `modules.json`. When false, the
    companion `go-hardware-driver` (>=0.2.0) leaves the slot completely

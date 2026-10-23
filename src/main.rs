@@ -33,6 +33,39 @@ fn flag_scan_error() {
     SCAN_HAD_ERRORS.store(true, Ordering::Relaxed);
 }
 
+/// Where go-modules marks the slots it is working on, one file per slot holding
+/// the process id. go-multibus supervises Multibus modules on the same slots
+/// and the same module bus: unmarked, it sees its module disappear in the
+/// middle of an upload and resets the slot, which kills the upload. It leaves a
+/// marked slot alone for as long as the process named in the file is alive, so
+/// a marker left behind by a crash does not hold a slot forever.
+const BUSY_DIR: &str = "/run/gocontroll/module-busy";
+
+fn mark_busy(slots: impl IntoIterator<Item = u8>) {
+    let _ = fs::create_dir_all(BUSY_DIR);
+    let pid = std::process::id().to_string();
+    for slot in slots {
+        let _ = fs::write(format!("{BUSY_DIR}/{slot}"), &pid);
+    }
+}
+
+/// Remove the markers this process wrote. Called on every exit path, through
+/// `restart_services`.
+fn release_busy() {
+    let pid = std::process::id().to_string();
+    let Ok(entries) = fs::read_dir(BUSY_DIR) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ours = fs::read_to_string(entry.path())
+            .map(|text| text.trim() == pid)
+            .unwrap_or(false);
+        if ours {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -1593,7 +1626,11 @@ fn format_module_lines(modules: &[Module], available: &[FirmwareVersion]) -> Vec
 /// before the app started. Idempotent — safe to call from the ctrlc handler
 /// and from the normal exit path. `go-hardware-driver` is absent on legacy
 /// controllers; in that case the snapshot bool is simply false and we skip it.
+/// Releases this process's slot markers first, so go-multibus picks its
+/// modules up again.
 fn restart_services(nodered: bool, simulink: bool, hardware_driver: bool) {
+    release_busy();
+
     if nodered {
         _ = Command::new("systemctl")
             .arg("start")
@@ -1891,6 +1928,13 @@ async fn get_modules(controller: &ControllerTypes) -> Vec<Module> {
         }
     }
     modules
+}
+
+/// Scan a single slot, for the commands that only touch that slot. Nothing is
+/// saved: the update or overwrite that follows writes its own result into
+/// `modules.json`, and the other slots' entries stay as they were.
+async fn get_one_module(slot: u8, controller: ControllerTypes) -> Vec<Module> {
+    Module::new(slot, &controller).await.into_iter().collect()
 }
 
 /// get the modules in the controller and save them
@@ -2637,6 +2681,19 @@ async fn main() {
         }
     }
 
+    // Refuse an unknown command before anything touches the hardware. The scan
+    // below resets every module in the controller, and it used to run before
+    // the command was looked at: `go-modules --version`, or a typo, took every
+    // module offline - live CAN and serial traffic included - just to print
+    // the usage text.
+    match cli_arg1.as_deref() {
+        None | Some("scan") | Some("update") | Some("overwrite") => {}
+        Some(other) => {
+            eprintln!("Invalid command entered {}\n{}", other, USAGE);
+            exit(-1);
+        }
+    }
+
     // Detect controller
     let controller = detect_controller();
 
@@ -2671,8 +2728,26 @@ async fn main() {
         exit(-1);
     }
 
+    // `update <slot>` and `overwrite <slot> <file>` work on one slot, so they
+    // scan that slot only. A full scan resets every module in the controller,
+    // and a module in another slot - a second Multibus carrying live CAN and
+    // serial traffic - has no business going down for someone else's update.
+    let target_slot: Option<u8> = match cli_arg1.as_deref() {
+        Some("update") | Some("overwrite") => cli_arg2.as_deref().and_then(|s| s.parse().ok()),
+        _ => None,
+    };
+
+    // Tell go-multibus which slots to keep its hands off while we work.
+    match target_slot {
+        Some(slot) => mark_busy([slot]),
+        None => mark_busy(1..controller as u8),
+    }
+
     // Scan modules in parallel with the rest of init
-    let modules_fut = task::spawn(get_modules_and_save(controller));
+    let modules_fut = match target_slot {
+        Some(slot) => task::spawn(get_one_module(slot, controller)),
+        None => task::spawn(get_modules_and_save(controller)),
+    };
 
     // Resolve firmware directory; offer download if missing
     let mut available_firmwares: Vec<FirmwareVersion> = if fs::metadata(FIRMWARE_DIR).is_err() {
@@ -2801,8 +2876,11 @@ async fn main() {
                     cli_arg2.clone(),
                 )
                 .await;
-                modules = if returned.is_empty() {
+                modules = if returned.is_empty() && !started_from_cli {
                     // Action ran or the sub-menu consumed the modules — rescan.
+                    // Not from the command line: the program ends right here,
+                    // and the rescan resets every module in the controller -
+                    // the one just updated straight back into its bootloader.
                     get_modules(&controller).await
                 } else {
                     returned
@@ -2824,7 +2902,9 @@ async fn main() {
                     cli_arg3.clone(),
                 )
                 .await;
-                modules = if returned.is_empty() {
+                modules = if returned.is_empty() && !started_from_cli {
+                    // See the update branch: no reset-everything rescan when
+                    // the program ends right after.
                     get_modules(&controller).await
                 } else {
                     returned

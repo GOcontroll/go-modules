@@ -1,3 +1,22 @@
+v3.3.2
+ - An unknown command is refused before anything touches the hardware. The
+   module scan used to run first, so `go-modules --version` or a typo reset
+   every module in the controller - a Multibus module carrying live CAN and
+   serial traffic included - just to print the usage text.
+ - `update <slot>` and `overwrite <slot> <firmware>` scan only that slot.
+   A full scan resets every module; updating one module no longer takes the
+   others down. `modules.json` gets the updated slot's entry as before.
+ - From the command line, `update` and `overwrite` no longer rescan every
+   module after the upload. That rescan exists to refresh the TUI list, but
+   it reset every module in the controller - the other modules included, and
+   the one just updated straight back into its bootloader instead of the
+   application it had just jumped to. The TUI still rescans.
+ - While go-modules works on a slot it writes its process id to
+   `/run/gocontroll/module-busy/<slot>` (every slot for a full scan or the
+   TUI), and removes the markers on exit. go-multibus (>=0.3.0) leaves a
+   marked slot alone while the process lives, instead of resetting its
+   module in the middle of an upload.
+
 v3.3.1
  - `go-modules check` (also run by the package's postinst) fetches the cloud
    firmware from firmware.gocontroll.tech first and falls back to
